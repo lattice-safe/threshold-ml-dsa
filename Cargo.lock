@@ -95,8 +95,9 @@ dependencies = [
 [[package]]
 name = "dilithium-rs"
 version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9b0aa9ae3a1b700e0ac9f707cdff5c3893f4f11a3b1b317c5113a422ef785809"
 dependencies = [
- "getrandom",
  "sha2",
  "sha3",
  "subtle",
@@ -274,7 +275,7 @@ dependencies = [
 
 [[package]]
 name = "threshold-ml-dsa"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "chacha20poly1305",
  "dilithium-rs",

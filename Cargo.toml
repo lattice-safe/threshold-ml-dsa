@@ -9,6 +9,7 @@ categories = ["cryptography", "cryptography::post-quantum", "no-std"]
 keywords = ["fips-204", "ml-dsa", "threshold", "mithril", "post-quantum"]
 license = "MIT"
 readme = "README.md"
+exclude = ["scratch_test.rs", "fuzz/", "target/"]
 
 [dependencies]
 rand_core = { version = "0.6", default-features = false }
@@ -18,7 +19,7 @@ subtle = { version = "2", default-features = false }
 
 # Pure-Rust FIPS 204 implementation — NTT, Montgomery reduction, and canonical verification
 # https://crates.io/crates/dilithium-rs
-dilithium-rs = { path = "../dilithium-rs" }
+dilithium-rs = { version = "0.2.0", default-features = false }
 
 [dev-dependencies]
 rand = "0.8"
