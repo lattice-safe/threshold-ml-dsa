@@ -224,7 +224,7 @@ $$|\mathcal{S}_M| = \binom{N}{M} = \binom{N}{N-T+1}$$
 
 **Example** $(N=3, T=2)$:
 
-$$M=2,\ \mathcal{S}_2 = \big\{ \{0,1\},\ \{0,2\},\ \{1,2\} \big\} \qquad |\mathcal{S}_2| = 3$$
+$$M=2,\ \mathcal{S}_2 = \left\{ \{0,1\},\ \{0,2\},\ \{1,2\} \right\} \qquad |\mathcal{S}_2| = 3$$
 
 ### 5.2 Share Distribution
 
@@ -472,7 +472,7 @@ L∞ checks. Actual protocol success still depends on aggregate signer behavior 
 
 **Step 1 — Validate partials:**
 
-- **ADV-2 (Sybil):** Deduplicate by party_id — reject duplicate submissions
+- **ADV-2 (Sybil):** Deduplicate by `party_id` — reject duplicate submissions
 - **ADV-6 (Replay):** Verify each session binding: $\text{SHAKE-256}(\tilde{c} \| i) \stackrel{?}{=} \text{binding}_i$
 
 **Step 2 — Sum:**
@@ -529,7 +529,7 @@ $$\text{Verify}(pk, \text{msg}, \sigma) \to \{0, 1\}$$
 
 **Verification equation:**
 
-$$\mathbf{w}_1' = \text{UseHint}\big(\mathbf{h},\ \mathbf{A}\mathbf{z} - c \cdot \mathbf{t}_1 \cdot 2^d\big)$$
+$$\mathbf{w}_1' = \text{UseHint}(\mathbf{h},\ \mathbf{A}\mathbf{z} - c \cdot \mathbf{t}_1 \cdot 2^d)$$
 
 $$\tilde{c}' = \text{SHAKE-256}(\mu \| \text{pack}(\mathbf{w}_1'))$$
 
@@ -814,9 +814,7 @@ flowchart TD
 
 The threshold signature is **identical** in format to a standard ML-DSA signature. The verification equation holds because:
 
-$$\mathbf{z} = \sum_{i \in \mathcal{A}} \mathbf{z}_i
-= \sum_{i \in \mathcal{A}} (\mathbf{y}_i + c \cdot \mathbf{s}^{\text{sign}}_{1,i})
-= \underbrace{\sum_{i \in \mathcal{A}} \mathbf{y}_i}_{\text{aggregate mask}} + c \cdot \underbrace{\sum_{i \in \mathcal{A}} \mathbf{s}^{\text{sign}}_{1,i}}_{\mathbf{s}_1}$$
+$$\mathbf{z} = \sum_{i \in \mathcal{A}} \mathbf{z}_i = \sum_{i \in \mathcal{A}} (\mathbf{y}_i + c \cdot \mathbf{s}^{\text{sign}}_{1,i}) = \underbrace{\sum_{i \in \mathcal{A}} \mathbf{y}_i}_{\text{aggregate mask}} + c \cdot \underbrace{\sum_{i \in \mathcal{A}} \mathbf{s}^{\text{sign}}_{1,i}}_{\mathbf{s}_1}$$
 
 ### Unforgeability
 
