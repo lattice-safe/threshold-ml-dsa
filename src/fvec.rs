@@ -173,58 +173,6 @@ pub fn sample_hyperball(out: &mut FVec, radius: f64, nu: f64, rhop: &[u8; 64], n
     }
 }
 
-/// Pack K VecK commitments into bytes.
-/// Each polynomial is packed as QBits=23 bits per coefficient.
-pub fn pack_w(ws: &[PolyVecK], buf: &mut [u8]) {
-    let poly_q_size = (N * 23) / 8; // 23 bits per coeff, 256 coeffs = 736 bytes
-    let single_commitment_size = K * poly_q_size;
-    let mut offset = 0;
-    for w in ws {
-        for poly in &w.polys {
-            for chunk_start in (0..N).step_by(8) {
-                // Pack 8 coefficients using 23 bytes (8 × 23 bits = 184 bits = 23 bytes)
-                let mut bits: u64 = 0;
-                let mut bit_offset = 0u32;
-                for k in 0..core::cmp::min(8, N - chunk_start) {
-                    let coeff = poly.coeffs[chunk_start + k];
-                    // Write 23 bits
-                    if bit_offset + 23 <= 64 {
-                        bits |= (coeff as u64 & 0x7FFFFF) << bit_offset;
-                        bit_offset += 23;
-                    }
-                }
-                // Write bits to output
-                let bytes_to_write = ((bit_offset + 7) / 8) as usize;
-                for b in 0..bytes_to_write {
-                    if offset < buf.len() {
-                        buf[offset] = (bits >> (b * 8)) as u8;
-                        offset += 1;
-                    }
-                }
-            }
-        }
-    }
-}
-
-/// Unpack K VecK commitments from bytes.
-pub fn unpack_w(ws: &mut [PolyVecK], buf: &[u8]) {
-    let poly_q_size = (N * 23) / 8;
-    let mut offset = 0;
-    for w in ws.iter_mut() {
-        for poly in w.polys.iter_mut() {
-            for coeff_idx in 0..N {
-                // Read 23 bits per coefficient
-                let bit_pos = coeff_idx * 23;
-                let byte_pos = bit_pos / 8;
-                let bit_off = bit_pos % 8;
-                if byte_pos + 3 <= buf.len() - (offset / 8).min(buf.len()) {
-                    // Simplified: read 4 bytes and extract 23 bits
-                    // This is a placeholder — production would need exact bit-packing
-                }
-            }
-        }
-    }
-}
 
 #[cfg(test)]
 mod tests {

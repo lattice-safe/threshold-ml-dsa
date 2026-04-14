@@ -16,7 +16,6 @@ use crate::error::Error;
 use crate::params::*;
 use crate::poly::*;
 use crate::sign;
-use crate::verify;
 use sha3::digest::{ExtendableOutput, Update, XofReader};
 use sha3::Shake256;
 

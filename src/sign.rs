@@ -24,7 +24,7 @@ use crate::fvec::{FVec, sample_hyperball};
 use crate::params::*;
 use crate::partition;
 use crate::poly::{Poly, PolyVecK, PolyVecL};
-use crate::rss::{ThresholdPrivateKey, Share};
+use crate::rss::ThresholdPrivateKey;
 use sha3::digest::{ExtendableOutput, Update, XofReader};
 use sha3::Shake256;
 use rand_core::{CryptoRng, RngCore};

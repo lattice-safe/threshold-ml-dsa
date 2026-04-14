@@ -28,7 +28,6 @@ use alloc::{collections::BTreeMap, vec::Vec};
 #[cfg(feature = "std")]
 use std::collections::BTreeMap;
 
-use crate::error::Error;
 use crate::params::*;
 use crate::poly::{Poly, PolyVecK, PolyVecL};
 use sha3::digest::{ExtendableOutput, Update, XofReader};
@@ -303,7 +302,7 @@ fn compute_public_key(rho: &[u8; 32], s1h_total: &PolyVecL, s2_total: &PolyVecK)
             polyveck_caddq, polyveck_add,
         },
         packing::pack_pk,
-        DilithiumMode, ML_DSA_44,
+        ML_DSA_44,
     };
 
     let mode = ML_DSA_44;
