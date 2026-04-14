@@ -4,6 +4,8 @@
 
 A `#![no_std]`-compatible Rust implementation of threshold ML-DSA-44 based on the Mithril scheme ([ePrint 2026/013](https://eprint.iacr.org/2026/013)). On successful aggregation, produced signatures are compatible with standard FIPS 204 verifiers. The coordinator is fail-closed: if a valid aggregate is not obtained, signing returns an error.
 
+For SDK-centric usage, see [SDK.md](SDK.md).
+
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Rust](https://img.shields.io/badge/rust-1.70%2B-orange.svg)](https://www.rust-lang.org)
 
@@ -78,6 +80,31 @@ let (pk, _sk) = verify::keygen(&seed);
 // assert!(verify::verify(&sig.to_bytes(), msg, &pk));
 ```
 
+## SDK Quick Start
+
+If you want an SDK-style API (instead of manually orchestrating `rss/sign/coordinator`), use `sdk::ThresholdMlDsa44Sdk`:
+
+```rust
+use rand::rngs::OsRng;
+use threshold_ml_dsa::sdk::ThresholdMlDsa44Sdk;
+
+let mut rng = OsRng;
+let seed = [7u8; 32];
+
+// keygen + thresholdization + party setup
+let (mut sdk, _standard_sk) = ThresholdMlDsa44Sdk::from_seed(
+    &seed,
+    4,   // N
+    3,   // T
+    128, // max_retries
+    &mut rng,
+)?;
+
+let msg = b"sdk signing example";
+let sig = sdk.sign(msg, &mut rng)?;
+assert!(sdk.verify(msg, &sig));
+```
+
 ## Modules
 
 | Module | Description |
@@ -87,6 +114,7 @@ let (pk, _sk) = verify::keygen(&seed);
 | `rss` | Replicated Secret Sharing: key distribution and reconstruction for (N, T)-threshold |
 | `sign` | Party state machine with precommit/reveal/commit/sign rounds, hedged nonces, session binding |
 | `coordinator` | Signature aggregation with commitment verification, Sybil protection, and automatic retry |
+| `sdk` | High-level SDK wrapper (`from_seed`, `new`, `sign`, `verify`) for app integration |
 | `verify` | FIPS 204 verification via `dilithium-rs` |
 | `error` | `no_std`-compatible error types |
 
@@ -129,12 +157,14 @@ Every critical primitive is verified byte-exact against the reference implementa
 - **Commitment binding** — Precommit/reveal/verify round
 - **Session binding** — Stale z_i rejection across sessions
 - **Full signing flow** — 4-round threshold signing with FIPS 204 verification
+- **Encrypted challenge transport** — N=4, T=3 integration tests with per-player ML-KEM keys, tamper rejection, wrong-key rejection, and replay rejection
 
 ## Security Notes
 
 - The coordinator does **not** reconstruct a full ML-DSA secret key during signing.
 - Signing is fail-closed: if retries do not produce a verifiable aggregate, an error is returned.
 - RSS reconstruction validates subset-index bounds and replica consistency.
+- The `sdk` module is an in-process orchestrator. For production distributed deployments, run parties in isolated processes and enforce authenticated/encrypted transport.
 
 ## Dependencies
 

@@ -22,6 +22,8 @@ dilithium-rs = { path = "../dilithium-rs" }
 
 [dev-dependencies]
 rand = "0.8"
+lattice-kyber = "0.1.2"
+chacha20poly1305 = "0.10.1"
 
 [features]
 default = ["std"]

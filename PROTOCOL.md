@@ -25,6 +25,7 @@
 12. [Sequence Diagrams](#12-sequence-diagrams)
 13. [Activity Diagrams](#13-activity-diagrams)
 14. [Security Properties](#14-security-properties)
+15. [SDK Integration Layer](#15-sdk-integration-layer)
 
 ---
 
@@ -845,6 +846,44 @@ The threshold scheme inherits the _Module-LWE/Module-SIS_ hardness assumptions f
 Liveness depends on concrete parameterization, active-set choice, and rejection outcomes.
 The implementation maintains safety by retrying with qualifying signer sets and returning
 an error if no verifiable aggregate is produced within the configured retry budget.
+
+---
+
+## 15. SDK Integration Layer
+
+The crate now exposes a high-level SDK module: `threshold_ml_dsa::sdk`.
+
+### Goals
+
+- Provide an application-friendly API for common workflows.
+- Preserve the exact same cryptographic core and fail-closed semantics.
+- Keep low-level modules available for custom distributed deployments.
+
+### Primary SDK Types
+
+- `MlDsa44ThresholdMaterial`
+  - Extracts `(rho, tr, s1, s2)` from a standard ML-DSA-44 keypair.
+  - Supports `from_secret_key(pk, sk)` and `from_seed(seed)`.
+- `ThresholdMlDsa44Sdk`
+  - Builds and owns `N` parties for threshold signing.
+  - Exposes `sign(msg, rng)` and `verify(msg, sig)`.
+  - Enforces fail-closed behavior through the same coordinator path.
+
+### Mapping to Core Protocol
+
+- `ThresholdMlDsa44Sdk::new(...)`
+  - Runs RSS distribution (`rss::distribute_key`)
+  - Builds party state machines (`sign::Party`)
+- `ThresholdMlDsa44Sdk::sign(...)`
+  - Calls `coordinator::threshold_sign` (hardened 4-round flow)
+- `ThresholdMlDsa44Sdk::verify(...)`
+  - Calls `verify::verify` (standard FIPS 204 verifier path)
+
+### Operational Note
+
+`sdk` is an in-process orchestration layer. For production distributed systems,
+parties should run in isolated processes/devices, and all round messages should
+be transported with authenticated encryption and replay protection.
 
 ---
 
