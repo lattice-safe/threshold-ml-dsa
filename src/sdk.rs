@@ -1,264 +1,191 @@
 //! High-level SDK API for threshold ML-DSA-44.
 //!
-//! This module provides an opinionated wrapper around the low-level protocol
-//! modules (`rss`, `sign`, `coordinator`, `verify`) so application code can:
-//! 1. derive threshold key material from a standard ML-DSA-44 keypair
-//! 2. initialize a signing cluster for `(N, T)`
-//! 3. produce fail-closed threshold signatures with a single call
-//!
-//! The wrapper remains fully compatible with FIPS 204 verification.
+//! v0.3.0: This module is being rewritten to use the paper-faithful keygen
+//! from `rss::keygen_from_seed`. The old `from_secret_key` API is removed.
 
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
 #[cfg(feature = "std")]
 use std::vec::Vec;
 
-use crate::coordinator::{self, Signature};
 use crate::error::Error;
 use crate::params::*;
-use crate::poly::{MatrixA, PolyVecK, PolyVecL};
+use crate::poly::{PolyVecK, PolyVecL};
 use crate::rss;
-use crate::sign::Party;
 use crate::verify;
 use rand_core::{CryptoRng, RngCore};
-use zeroize::{Zeroize, Zeroizing};
 
-/// Extracted ML-DSA-44 material required for thresholdization.
+/// High-level threshold ML-DSA-44 SDK.
 ///
-/// This struct intentionally separates:
-/// - public data (`pk`, `tr`, `rho`)
-/// - secret vectors (`s1`, `s2`) that are zeroized on drop
-#[derive(Clone, Zeroize)]
-#[zeroize(drop)]
-pub struct MlDsa44ThresholdMaterial {
-    /// ML-DSA-44 public key bytes.
-    #[zeroize(skip)]
-    pub pk: Vec<u8>,
-    /// Hash of public key (`tr = H(pk)`), used by Fiat-Shamir challenge derivation.
-    #[zeroize(skip)]
-    pub tr: [u8; TRBYTES],
-    /// Public matrix seed (`rho`) from the ML-DSA keypair.
-    #[zeroize(skip)]
-    pub rho: [u8; SEEDBYTES],
-    /// Secret key vector s1 (zeroized on drop).
-    pub s1: PolyVecL,
-    /// Secret key vector s2 (zeroized on drop).
-    pub s2: PolyVecK,
-}
-
-impl MlDsa44ThresholdMaterial {
-    /// Derive threshold material from an existing ML-DSA-44 keypair.
-    ///
-    /// # Errors
-    /// Returns [`Error::InvalidParameters`] if key sizes do not match ML-DSA-44.
-    pub fn from_secret_key(pk: &[u8], sk: &[u8]) -> Result<Self, Error> {
-        let mode = dilithium::params::ML_DSA_44;
-        if pk.len() != mode.public_key_bytes() || sk.len() != mode.secret_key_bytes() {
-            return Err(Error::InvalidParameters);
-        }
-
-        let mut rho_ref = [0u8; dilithium::params::SEEDBYTES];
-        let mut tr_ref = [0u8; dilithium::params::TRBYTES];
-        let mut key = [0u8; dilithium::params::SEEDBYTES];
-        let mut t0 = dilithium::polyvec::PolyVecK::default();
-        let mut s1_ref = dilithium::polyvec::PolyVecL::default();
-        let mut s2_ref = dilithium::polyvec::PolyVecK::default();
-        dilithium::packing::unpack_sk(
-            mode,
-            &mut rho_ref,
-            &mut tr_ref,
-            &mut key,
-            &mut t0,
-            &mut s1_ref,
-            &mut s2_ref,
-            sk,
-        );
-
-        let mut s1 = PolyVecL::zero();
-        let mut s2 = PolyVecK::zero();
-        for i in 0..L {
-            s1.polys[i].coeffs = s1_ref.vec[i].coeffs;
-        }
-        for i in 0..K {
-            s2.polys[i].coeffs = s2_ref.vec[i].coeffs;
-        }
-
-        Ok(Self {
-            pk: pk.to_vec(),
-            tr: tr_ref,
-            rho: rho_ref,
-            s1,
-            s2,
-        })
-    }
-
-    /// Generate an ML-DSA-44 keypair and derive threshold material.
-    ///
-    /// Returns the extracted threshold material plus the raw standard secret key.
-    /// The returned secret key is wrapped in [`Zeroizing`].
-    pub fn from_seed(seed: &[u8; 32]) -> Result<(Self, Zeroizing<Vec<u8>>), Error> {
-        let (pk, sk) = verify::keygen(seed);
-        let material = Self::from_secret_key(&pk, &sk)?;
-        Ok((material, Zeroizing::new(sk)))
-    }
-}
-
-/// High-level stateful SDK for threshold ML-DSA-44 signing.
-///
-/// This struct manages party instances and coordinator invocation internally.
-/// It is a convenience API for in-process orchestrations and tests.
-///
-/// For networked deployments, use the low-level modules and explicit transport
-/// control (e.g. encrypted/authenticated channels for round messages).
+/// This provides a one-call interface for threshold key generation
+/// and signing, following ePrint 2026/013 exactly.
 pub struct ThresholdMlDsa44Sdk {
-    parties: Vec<Party>,
-    pk: Vec<u8>,
-    tr: [u8; TRBYTES],
-    t: usize,
-    max_retries: usize,
+    /// Packed public key (ρ ‖ t₁)
+    pub pk: [u8; PK_BYTES],
+    /// Per-party private keys
+    pub sks: Vec<rss::ThresholdPrivateKey>,
+    /// Threshold parameters (T, N, K, r, r₁, ν)
+    pub params: ThresholdParams,
+    /// Maximum full-protocol retries
+    pub max_retries: usize,
 }
 
 impl ThresholdMlDsa44Sdk {
-    /// Build a threshold signing SDK instance from extracted threshold material.
+    /// Create a threshold SDK from a 32-byte seed.
     ///
-    /// # Arguments
-    /// - `material`: extracted ML-DSA-44 vectors/seeds for thresholdization
-    /// - `n`: total parties
-    /// - `t`: threshold
-    /// - `max_retries`: max retries for fail-closed local-rejection handling
-    ///
-    /// # Errors
-    /// Returns [`Error::InvalidParameters`] for invalid `(N, T)` or retry config.
-    pub fn new<R: RngCore + CryptoRng>(
-        material: &MlDsa44ThresholdMaterial,
-        n: usize,
-        t: usize,
+    /// Generates fresh threshold keys using the paper's keygen (Figure 4).
+    /// Returns the SDK instance ready for signing.
+    pub fn from_seed(
+        seed: &[u8; 32],
+        t: u8,
+        n: u8,
         max_retries: usize,
-        rng: &mut R,
     ) -> Result<Self, Error> {
-        if material.pk.len() != PK_BYTES
-            || n < 2
-            || t < 2
-            || t > n
-            || n > MAX_PARTIES
-            || max_retries == 0
-        {
+        let params = get_threshold_params(t, n)
+            .ok_or(Error::InvalidParameters)?;
+
+        if max_retries == 0 {
             return Err(Error::InvalidParameters);
         }
 
-        let shares = rss::distribute_key(&material.s1, &material.s2, n, t, rng)?;
-        let a_hat = MatrixA::expand(&material.rho);
-        let parties = shares
-            .iter()
-            .map(|share| Party::new(share, a_hat.clone()))
-            .collect();
+        let (pk, sks) = rss::keygen_from_seed(seed, &params);
 
-        Ok(Self {
-            parties,
-            pk: material.pk.clone(),
-            tr: material.tr,
-            t,
-            max_retries,
-        })
+        Ok(Self { pk, sks, params, max_retries })
     }
 
-    /// One-call constructor: keygen + thresholdization + SDK setup.
+    /// Sign a message using threshold signing.
     ///
-    /// Returns `(sdk, standard_secret_key)`.
-    pub fn from_seed<R: RngCore + CryptoRng>(
-        seed: &[u8; 32],
-        n: usize,
-        t: usize,
-        max_retries: usize,
-        rng: &mut R,
-    ) -> Result<(Self, Zeroizing<Vec<u8>>), Error> {
-        let (material, sk) = MlDsa44ThresholdMaterial::from_seed(seed)?;
-        let sdk = Self::new(&material, n, t, max_retries, rng)?;
-        Ok((sdk, sk))
-    }
-
-    /// Produce a threshold signature for `msg`.
+    /// # Arguments  
+    /// * `active` — sorted list of active signer IDs (length = T)
+    /// * `msg` — message to sign
+    /// * `rng` — CSPRNG for hedged nonce generation
     ///
-    /// This call is fail-closed: if no verifiable aggregate is found within
-    /// `max_retries`, it returns an error.
-    pub fn sign<R: RngCore + CryptoRng>(
-        &mut self,
+    /// # Returns
+    /// A valid FIPS 204 signature on success.
+    pub fn threshold_sign<R: RngCore + CryptoRng>(
+        &self,
+        active: &[u8],
         msg: &[u8],
         rng: &mut R,
-    ) -> Result<Signature, Error> {
-        coordinator::threshold_sign(
-            &mut self.parties,
-            msg,
-            &self.tr,
-            &self.pk,
-            self.t,
-            self.max_retries,
-            rng,
-        )
+    ) -> Result<[u8; SIG_BYTES], Error> {
+        use crate::coordinator;
+        use crate::sign;
+
+        if active.len() != self.params.t as usize {
+            return Err(Error::InvalidParameters);
+        }
+
+        let t = self.params.t as usize;
+        let k_reps = self.params.k_reps as usize;
+
+        // Build active bitmask
+        let mut act: u8 = 0;
+        for &id in active {
+            act |= 1 << id;
+        }
+
+        for _attempt in 0..self.max_retries {
+            // ── Round 1: Each party generates K commitments ──
+            let mut rd1_hashes: Vec<[u8; 32]> = Vec::with_capacity(t);
+            let mut rd1_states: Vec<sign::StRound1> = Vec::with_capacity(t);
+
+            for &party_id in active {
+                let sk = &self.sks[party_id as usize];
+                // Clone rng bytes for each party (in production, each party has its own RNG)
+                let (hash, st1) = sign::round1(sk, &self.params, rng)?;
+                rd1_hashes.push(hash);
+                rd1_states.push(st1);
+            }
+
+            // ── Round 2: Each party reveals commitments and computes μ ──
+            let mut rd2_reveals: Vec<Vec<u8>> = Vec::with_capacity(t);
+            let mut rd2_states: Vec<sign::StRound2> = Vec::with_capacity(t);
+
+            for (idx, &party_id) in active.iter().enumerate() {
+                let sk = &self.sks[party_id as usize];
+                let (reveal, st2) = sign::round2(
+                    sk, act, msg, &rd1_hashes, &rd1_states[idx], &self.params,
+                );
+                rd2_reveals.push(reveal);
+                rd2_states.push(st2);
+            }
+
+            // ── Aggregate commitments ──
+            // Parse each party's reveal into K PolyVecK commitments
+            let packed_size = sign::pack_w_single_size();
+            let mut all_reveals: Vec<Vec<PolyVecK>> = Vec::with_capacity(t);
+            for reveal in &rd2_reveals {
+                let mut party_ws: Vec<PolyVecK> = Vec::with_capacity(k_reps);
+                for k in 0..k_reps {
+                    let start = k * packed_size;
+                    let end = start + packed_size;
+                    if end <= reveal.len() {
+                        party_ws.push(sign::unpack_w_single(&reveal[start..end]));
+                    }
+                }
+                all_reveals.push(party_ws);
+            }
+
+            let wfinals = coordinator::aggregate_commitments(&all_reveals, k_reps);
+
+            // ── Round 3: Each party computes K responses ──
+            let mut all_responses: Vec<Vec<PolyVecL>> = Vec::with_capacity(t);
+            for (idx, &party_id) in active.iter().enumerate() {
+                let sk = &self.sks[party_id as usize];
+                let zs = sign::round3(
+                    sk, &wfinals, &rd1_states[idx], &rd2_states[idx], &self.params,
+                );
+                all_responses.push(zs);
+            }
+
+            let zfinals = coordinator::aggregate_responses(&all_responses, k_reps);
+
+            // ── Combine: try each of K slots ──
+            match coordinator::combine(&self.pk, msg, &wfinals, &zfinals, &self.params) {
+                Ok(sig) => {
+                    // Fail-closed: verify before returning
+                    if verify::verify(&self.pk, msg, &sig) {
+                        return Ok(sig);
+                    }
+                    // Signature didn't verify — retry
+                    continue;
+                }
+                Err(_) => continue,
+            }
+        }
+
+        Err(Error::InsufficientResponses)
     }
 
-    /// Verify a signature using this SDK instance's public key.
-    pub fn verify(&self, msg: &[u8], sig: &Signature) -> bool {
-        verify::verify(&sig.to_bytes(), msg, &self.pk)
-    }
-
-    /// Borrow the public key.
-    pub fn public_key(&self) -> &[u8] {
-        &self.pk
-    }
-
-    /// Borrow the `tr` hash.
-    pub fn tr(&self) -> &[u8; TRBYTES] {
-        &self.tr
-    }
-
-    /// Return the configured threshold.
-    pub fn threshold(&self) -> usize {
-        self.t
-    }
-
-    /// Return number of parties managed by this SDK instance.
-    pub fn party_count(&self) -> usize {
-        self.parties.len()
-    }
-
-    /// Return the configured max retry count.
-    pub fn max_retries(&self) -> usize {
-        self.max_retries
+    /// Verify a signature using the standard ML-DSA-44 verifier.
+    pub fn verify(&self, msg: &[u8], sig: &[u8]) -> bool {
+        verify::verify(&self.pk, msg, sig)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rand::rngs::StdRng;
-    use rand::SeedableRng;
 
     #[test]
-    fn test_sdk_invalid_parameters() {
-        let (material, _sk) = MlDsa44ThresholdMaterial::from_seed(&[1u8; 32]).unwrap();
-        let mut rng = StdRng::seed_from_u64(7);
-
-        let bad = ThresholdMlDsa44Sdk::new(&material, 1, 1, 0, &mut rng);
-        assert!(matches!(bad, Err(Error::InvalidParameters)));
+    fn test_sdk_creation() {
+        let seed = [42u8; 32];
+        let sdk = ThresholdMlDsa44Sdk::from_seed(&seed, 2, 3, 10).unwrap();
+        assert_eq!(sdk.sks.len(), 3);
+        assert_eq!(sdk.params.t, 2);
+        assert_eq!(sdk.params.n, 3);
     }
 
     #[test]
-    fn test_sdk_sign_fail_closed_or_valid() {
-        let mut rng = StdRng::seed_from_u64(20260414);
-        let (mut sdk, _sk) =
-            ThresholdMlDsa44Sdk::from_seed(&[9u8; 32], 4, 3, 128, &mut rng).unwrap();
-
-        assert_eq!(sdk.party_count(), 4);
-        assert_eq!(sdk.threshold(), 3);
-
-        let msg = b"sdk-sign-message";
-        match sdk.sign(msg, &mut rng) {
-            Ok(sig) => assert!(sdk.verify(msg, &sig)),
-            Err(Error::InvalidSignature) | Err(Error::InsufficientResponses) => {
-                // Expected fail-closed outcomes under local rejection dynamics.
-            }
-            Err(e) => panic!("unexpected sdk sign error: {e}"),
-        }
+    fn test_sdk_invalid_params() {
+        let seed = [42u8; 32];
+        // T < 2
+        assert!(ThresholdMlDsa44Sdk::from_seed(&seed, 1, 2, 10).is_err());
+        // T > N
+        assert!(ThresholdMlDsa44Sdk::from_seed(&seed, 3, 2, 10).is_err());
+        // N > 6
+        assert!(ThresholdMlDsa44Sdk::from_seed(&seed, 2, 7, 10).is_err());
+        // max_retries = 0
+        assert!(ThresholdMlDsa44Sdk::from_seed(&seed, 2, 2, 0).is_err());
     }
 }

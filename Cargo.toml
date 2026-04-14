@@ -1,6 +1,6 @@
 [package]
 name = "threshold-ml-dsa"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2021"
 description = "Threshold ML-DSA (FIPS 204) via the Mithril scheme (ePrint 2026/013)"
 authors = ["Suleyman Kardas <suleyman@lattice-safe.com>", "DeepMind AAC"]
@@ -16,6 +16,7 @@ rand_core = { version = "0.6", default-features = false }
 zeroize = { version = "1", default-features = false, features = ["derive"] }
 sha3 = { version = "0.10", default-features = false }
 subtle = { version = "2", default-features = false }
+libm = "0.2"
 
 # Pure-Rust FIPS 204 implementation — NTT, Montgomery reduction, and canonical verification
 # https://crates.io/crates/dilithium-rs

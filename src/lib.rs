@@ -28,7 +28,9 @@ extern crate alloc;
 
 pub mod coordinator;
 pub mod error;
+pub mod fvec;
 pub mod params;
+pub mod partition;
 pub mod poly;
 pub mod rss;
 pub mod sdk;

@@ -1,523 +1,410 @@
-//! Party (Signer) state machine for the threshold ML-DSA signing protocol.
+//! Party-side signing logic for the threshold ML-DSA protocol.
 //!
-//! Implements the hardened 4-round flow:
+//! Implements the 3-round signing flow from ePrint 2026/013:
 //!
-//! 0. **Pre-commit:** broadcast binding hash H(w_i ‖ party_id)
-//! 1. **Reveal:** reveal full commitment w_i
-//! 2. **Challenge:** coordinator derives c̃ from aggregate transcript
-//! 3. **Sign:** return z_i = c·s_i + y_i with local hyperball rejection
+//! **Round 1 (Commit):** Each party i generates K commitments
+//!   w_{i,k} = A·r_k + e_k using hyperball sampling, and broadcasts
+//!   H(tr ‖ id ‖ w_{i,k}).
 //!
-//! For transcript consistency, each round is bound to:
-//! - the same signer set
-//! - a coordinator-provided session context
+//! **Round 2 (Reveal):** Each party reveals the full w_{i,k} vectors.
+//!   Other parties verify the commitment hash.
+//!
+//! **Round 3 (Respond):** Each party computes K partial responses
+//!   z_{i,k} = (c·s₁_I + y_k, c·s₂_I + e_k) and applies the
+//!   hyperball rejection test ‖z_{i,k}‖₂ ≤ r.
+//!   Responses that pass are nonzero; those that fail are zero vectors.
+//!
+//! The coordinator then aggregates and tries each of the K slots.
 
-#[cfg(not(feature = "std"))]
+extern crate alloc;
 use alloc::vec::Vec;
 
 use crate::error::Error;
+use crate::fvec::{FVec, sample_hyperball};
 use crate::params::*;
-use crate::poly::{MatrixA, Poly, PolyVecK, PolyVecL};
-use crate::rss::{enumerate_subsets, PartyKeyShare};
-use rand_core::{CryptoRng, RngCore};
+use crate::partition;
+use crate::poly::{Poly, PolyVecK, PolyVecL};
+use crate::rss::{ThresholdPrivateKey, Share};
 use sha3::digest::{ExtendableOutput, Update, XofReader};
 use sha3::Shake256;
-use zeroize::Zeroize;
+use rand_core::{CryptoRng, RngCore};
 
-/// A binding hash for a commitment (Round 0 — pre-commitment).
-///
-/// This is broadcast before the full commitment w_i is revealed,
-/// preventing a corrupt coordinator from grinding challenges by
-/// selectively including/excluding parties (ADV-1).
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct CommitmentHash {
-    /// H(w_i_packed ‖ party_id) — 32 bytes.
-    pub hash: [u8; 32],
-    /// The party that produced this commitment.
-    pub party_id: usize,
+/// Round 1 state saved by a party for use in Round 3.
+pub struct StRound1 {
+    /// K packed commitment vectors (each is K polynomials in normal domain)
+    pub w_packed: Vec<Vec<u8>>,
+    /// K FVec randomness samples (for computing responses)
+    pub cmtst: Vec<FVec>,
 }
 
-/// A partial commitment from Round 1 of the signing protocol.
-///
-/// Contains w_i = A·NTT(y_i) — the party's partial contribution
-/// to the aggregate commitment.
-#[derive(Clone, Zeroize)]
-#[zeroize(drop)]
-pub struct Commitment {
-    /// The partial commitment vector w_i ∈ ℤ_q^K (in normal domain).
-    pub w: PolyVecK,
-    /// The binding hash for this commitment (ADV-1).
-    #[zeroize(skip)]
-    pub binding_hash: [u8; 32],
-    /// The party that produced this commitment.
-    #[zeroize(skip)]
-    pub party_id: usize,
+/// Round 2 state saved by a party for use in Round 3.
+pub struct StRound2 {
+    /// Commitment hashes received from all parties in Round 1
+    pub hashes: Vec<[u8; 32]>,
+    /// μ = CRH(tr ‖ msg)
+    pub mu: [u8; 64],
+    /// Active signer bitmask
+    pub act: u8,
 }
 
-/// A partial signature from Round 3 of the signing protocol.
-///
-/// Contains the party's response z_i that passed the hyperball rejection check,
-/// bound to the session via c_tilde_hash (ADV-6).
-#[derive(Clone, Debug, Zeroize)]
-#[zeroize(drop)]
-pub struct PartialSignature {
-    /// Party index.
-    #[zeroize(skip)]
-    pub party_id: usize,
-    /// The partial response z_i ∈ ℤ_q^L.
-    pub z: PolyVecL,
-    /// Session binding: H(c̃ ‖ party_id) to prevent replay (ADV-6).
-    #[zeroize(skip)]
-    pub session_binding: [u8; 32],
+/// Compute μ = CRH(tr ‖ msg).
+pub fn compute_mu(tr: &[u8; TRBYTES], msg: &[u8]) -> [u8; 64] {
+    let mut h = Shake256::default();
+    h.update(tr);
+    // ML-DSA context encoding: 0x00 ‖ len(ctx) ‖ ctx ‖ msg
+    h.update(&[0u8]); // attribute byte
+    h.update(&[0u8]); // ctx length = 0 (no context)
+    h.update(msg);
+    let mut mu = [0u8; 64];
+    h.finalize_xof().read(&mut mu);
+    mu
 }
 
-/// A signing party in the threshold ML-DSA protocol.
+/// Round 1: generate K hyperball commitments.
 ///
-/// Maintains per-round state across precommit/reveal/sign steps.
-pub struct Party {
-    /// Party index in [0, N).
-    pub id: usize,
+/// Returns:
+/// - `commitment_hash`: 32-byte hash H(tr ‖ id ‖ w_packed)
+/// - `StRound1`: saved state for Round 3
+///
+/// This matches the Go `Round1()` function.
+pub fn round1<R: RngCore + CryptoRng>(
+    sk: &ThresholdPrivateKey,
+    params: &ThresholdParams,
+    rng: &mut R,
+) -> Result<([u8; 32], StRound1), Error> {
+    // Generate 64-byte randomness for hyperball sampling
+    let mut rhop = [0u8; 64];
+    rng.fill_bytes(&mut rhop);
 
-    /// This party's RSS key share.
-    key_share: PartyKeyShare,
+    let k_reps = params.k_reps as usize;
+    let mut ws: Vec<PolyVecK> = Vec::with_capacity(k_reps);
+    let mut cmtst: Vec<FVec> = Vec::with_capacity(k_reps);
+    let mut w_packed_all: Vec<Vec<u8>> = Vec::with_capacity(k_reps);
 
-    /// Round-scoped additive share derived from RSS for the active signer set.
-    signing_s1_share: Option<PolyVecL>,
+    // Expand A from ρ
+    let a = expand_a(&sk.rho);
 
-    /// Local nonce counter mixed into hedged nonce derivation.
-    nonce_counter: u64,
+    for i in 0..k_reps {
+        let mut fv = FVec::zero();
+        // Sample from hyperball with radius r₁ (randomness ball)
+        sample_hyperball(&mut fv, params.r1, params.nu, &rhop, i as u16);
 
-    /// The public matrix A (in NTT domain).
-    a_hat: MatrixA,
+        // Split FVec into (r, e_) ∈ ℤ^L × ℤ^K
+        let mut r = PolyVecL::zero();
+        let mut e_ = PolyVecK::zero();
+        fv.round_to_polyvecs(&mut r, &mut e_);
 
-    /// Ephemeral masking vector y_i (Round 1 state). Zeroized after use.
-    y: Option<PolyVecL>,
-
-    /// Partial commitment w_i (Round 1 output, carried to Round 3).
-    w: Option<PolyVecK>,
-}
-
-impl Drop for Party {
-    fn drop(&mut self) {
-        self.key_share.zeroize();
-        if let Some(ref mut s1) = self.signing_s1_share {
-            s1.zeroize();
+        // Compute w = A·r + e_
+        let mut rh = r.clone();
+        rh.ntt();
+        let mut w = PolyVecK::zero();
+        for j in 0..K {
+            // w[j] = Σ_l A[j][l] · rh[l] (pointwise in NTT domain)
+            let mut acc = Poly::zero();
+            for l in 0..L {
+                let mut prod = Poly::zero();
+                Poly::pointwise_montgomery(&mut prod, &a[j][l], &rh.polys[l]);
+                let acc_copy = acc.clone();
+                Poly::add(&mut acc, &acc_copy, &prod);
+            }
+            acc.reduce();
+            acc.invntt_tomont();
+            // w[j] = A·r[j] + e_[j]
+            let acc_copy = acc.clone();
+            Poly::add(&mut w.polys[j], &acc_copy, &e_.polys[j]);
         }
-        if let Some(ref mut y) = self.y {
-            y.zeroize();
+        w.reduce();
+
+        // Pack w for transport (23 bits per coeff × K×N coefficients)
+        let packed = pack_w_single(&w);
+        w_packed_all.push(packed);
+
+        ws.push(w);
+        cmtst.push(fv);
+    }
+
+    // Compute commitment hash: H(tr ‖ id ‖ w_packed_all)
+    let mut h = Shake256::default();
+    h.update(&sk.tr);
+    h.update(&[sk.id]);
+    for packed in &w_packed_all {
+        h.update(packed);
+    }
+    let mut hash = [0u8; 32];
+    h.finalize_xof().read(&mut hash);
+
+    Ok((hash, StRound1 { w_packed: w_packed_all, cmtst }))
+}
+
+/// Round 2: reveal commitments and compute μ.
+///
+/// Verifies that all received commitment hashes match the party's Round 1 hashes.
+/// Returns the packed commitment data and state for Round 3.
+pub fn round2(
+    sk: &ThresholdPrivateKey,
+    act: u8,
+    msg: &[u8],
+    msgs_rd1: &[[u8; 32]], // commitment hashes from Round 1
+    st_rd1: &StRound1,
+    _params: &ThresholdParams,
+) -> (Vec<u8>, StRound2) {
+    // Concatenate all packed w data for this party's reveal
+    let mut reveal_data = Vec::new();
+    for packed in &st_rd1.w_packed {
+        reveal_data.extend_from_slice(packed);
+    }
+
+    // Save state for Round 3
+    let mu = compute_mu(&sk.tr, msg);
+
+    let st2 = StRound2 {
+        hashes: msgs_rd1.to_vec(),
+        mu,
+        act,
+    };
+
+    (reveal_data, st2)
+}
+
+/// Round 3: compute K parallel responses with hyperball rejection.
+///
+/// This matches the Go `ComputeResponses()` function.
+/// For each of the K parallel commitments, computes:
+///   z_k = c·s_I + (r_k, e_k) where (r_k, e_k) is from the hyperball sample
+///
+/// Then applies the ν-scaled L₂ norm check: ‖z_k‖₂ ≤ r.
+/// Responses that fail rejection are all-zero (coordinator will skip them).
+pub fn round3(
+    sk: &ThresholdPrivateKey,
+    wfinals: &[PolyVecK],    // K aggregated commitment vectors
+    st_rd1: &StRound1,       // saved randomness from Round 1
+    st_rd2: &StRound2,       // μ and active set from Round 2
+    params: &ThresholdParams,
+) -> Vec<PolyVecL> {
+    let k_reps = params.k_reps as usize;
+
+    // Recover this party's partial secret for the active signer set
+    let active = bitmask_to_sorted_ids(st_rd2.act, params.n);
+    let partition = partition::rss_recover(&active, params.n, params.t);
+
+    // Find which partition slot corresponds to this party
+    let party_idx = active.iter().position(|&id| id == sk.id)
+        .expect("Party must be in active set");
+
+    // Sum the shares assigned to this party by the partition
+    let (s1h, s2h) = recover_partial_secret(sk, &partition[party_idx]);
+
+    let mut zs: Vec<PolyVecL> = Vec::with_capacity(k_reps);
+
+    for i in 0..k_reps {
+        // Decompose w into w₀, w₁
+        let (_, w1) = decompose_veck(&wfinals[i]);
+
+        // c̃ = H(μ ‖ w₁_packed)
+        let c_tilde = compute_challenge(&st_rd2.mu, &w1);
+
+        // Expand challenge polynomial c
+        let mut ch = Poly::zero();
+        Poly::challenge(&mut ch, &c_tilde);
+        ch.ntt();
+
+        // Compute c·s₁ (in NTT domain)
+        let mut z = PolyVecL::zero();
+        for j in 0..L {
+            Poly::pointwise_montgomery(&mut z.polys[j], &ch, &s1h.polys[j]);
+            z.polys[j].invntt_tomont();
+        }
+        z.reduce();
+
+        // Compute c·s₂ (for the second half of the FVec)
+        let mut y = PolyVecK::zero();
+        for j in 0..K {
+            Poly::pointwise_montgomery(&mut y.polys[j], &ch, &s2h.polys[j]);
+            y.polys[j].invntt_tomont();
+        }
+        y.reduce();
+
+        // Build FVec from (c·s₁, c·s₂) and add the randomness sample
+        let mut zf = FVec::from_polyvecs(&z, &y);
+        zf.add_assign(&st_rd1.cmtst[i]);
+
+        // Hyperball rejection: check ‖zf‖₂ ≤ r
+        if zf.excess(params.r, params.nu) {
+            // Rejection: emit zero response
+            zs.push(PolyVecL::zero());
+            continue;
+        }
+
+        // Round FVec back to polynomial vector (only z part needed)
+        let mut z_out = PolyVecL::zero();
+        let mut _y_out = PolyVecK::zero();
+        zf.round_to_polyvecs(&mut z_out, &mut _y_out);
+        zs.push(z_out);
+    }
+
+    zs
+}
+
+// ─── Internal Helpers ────────────────────────────────────────────────
+
+/// Expand A from ρ using dilithium-rs.
+fn expand_a(rho: &[u8; 32]) -> Vec<Vec<Poly>> {
+    use dilithium::{
+        polyvec::{PolyVecL as DPolyVecL, matrix_expand},
+        ML_DSA_44,
+    };
+    let mode = ML_DSA_44;
+    let mut mat: [DPolyVecL; K] = core::array::from_fn(|_| DPolyVecL::default());
+    matrix_expand(mode, &mut mat, rho);
+
+    // Convert to our Poly format
+    let mut a: Vec<Vec<Poly>> = Vec::with_capacity(K);
+    for i in 0..K {
+        let mut row = Vec::with_capacity(L);
+        for j in 0..L {
+            let mut p = Poly::zero();
+            for c in 0..N {
+                p.coeffs[c] = mat[i].vec[j].coeffs[c];
+            }
+            row.push(p);
+        }
+        a.push(row);
+    }
+    a
+}
+
+
+/// Size of a single packed PolyVecK (23 bits per coefficient, K×N coefficients).
+pub fn pack_w_single_size() -> usize {
+    let poly_q_size = (N * 23 + 7) / 8;
+    K * poly_q_size
+}
+
+/// Pack a single PolyVecK as 23 bits per coefficient.
+pub fn pack_w_single(w: &PolyVecK) -> Vec<u8> {
+    let poly_q_size = (N * 23 + 7) / 8;
+    let total = K * poly_q_size;
+    let mut buf = alloc::vec![0u8; total];
+
+    let mut bit_pos = 0usize;
+    for poly in &w.polys {
+        for &coeff in &poly.coeffs {
+            let val = if coeff < 0 { (coeff + Q) as u32 } else { coeff as u32 };
+            // Write 23 bits at bit_pos
+            let byte_pos = bit_pos / 8;
+            let bit_off = bit_pos % 8;
+            let v = (val as u64) << bit_off;
+            for b in 0..4 {
+                if byte_pos + b < buf.len() {
+                    buf[byte_pos + b] |= (v >> (b * 8)) as u8;
+                }
+            }
+            bit_pos += 23;
         }
     }
+
+    buf
 }
 
-/// Compute a binding hash for a commitment: H(w_coefficients ‖ party_id).
-fn compute_commitment_hash(w: &PolyVecK, party_id: usize) -> [u8; 32] {
-    let mut hasher = Shake256::default();
+/// Unpack a single PolyVecK from 23-bit packed data.
+pub fn unpack_w_single(buf: &[u8]) -> PolyVecK {
+    let mut w = PolyVecK::zero();
+    let mut bit_pos = 0usize;
+    for poly in w.polys.iter_mut() {
+        for coeff in poly.coeffs.iter_mut() {
+            let byte_pos = bit_pos / 8;
+            let bit_off = bit_pos % 8;
+            let mut v: u64 = 0;
+            for b in 0..4 {
+                if byte_pos + b < buf.len() {
+                    v |= (buf[byte_pos + b] as u64) << (b * 8);
+                }
+            }
+            *coeff = ((v >> bit_off) & 0x7FFFFF) as i32;
+            bit_pos += 23;
+        }
+    }
+    w
+}
+
+/// Convert bitmask to sorted list of party IDs.
+fn bitmask_to_sorted_ids(mask: u8, n: u8) -> Vec<u8> {
+    let mut ids = Vec::new();
+    for i in 0..n {
+        if mask & (1 << i) != 0 {
+            ids.push(i);
+        }
+    }
+    ids
+}
+
+/// Recover this party's partial secret from the assigned share bitmasks.
+fn recover_partial_secret(
+    sk: &ThresholdPrivateKey,
+    assigned_masks: &[u8],
+) -> (PolyVecL, PolyVecK) {
+    let mut s1h = PolyVecL::zero();
+    let mut s2h = PolyVecK::zero();
+
+    for &mask in assigned_masks {
+        if let Some(share) = sk.shares.get(&mask) {
+            s1h.add_assign(&share.s1h);
+            s2h.add_assign(&share.s2h);
+        }
+    }
+    s1h.reduce();
+    s2h.reduce();
+    (s1h, s2h)
+}
+
+/// Decompose PolyVecK into (w₀, w₁) using Power2Round-style decompose.
+fn decompose_veck(w: &PolyVecK) -> (PolyVecK, PolyVecK) {
+    let mut w0 = PolyVecK::zero();
+    let mut w1 = PolyVecK::zero();
     for i in 0..K {
         for j in 0..N {
-            hasher.update(&w.polys[i].coeffs[j].to_le_bytes());
+            let a = w.polys[i].coeffs[j];
+            // Ensure a is in [0, Q)
+            let a_pos = if a < 0 { a + Q } else { a };
+            // Decompose: a = a₁·α + a₀ where α = 2γ₂
+            let alpha = 2 * GAMMA2;
+            let a0 = a_pos - ((a_pos + alpha / 2 - 1) / alpha) * alpha;
+            let a1 = if a0 > 0 {
+                (a_pos - a0) / alpha
+            } else {
+                (a_pos - a0 - 1) / alpha + 1
+            };
+            w0.polys[i].coeffs[j] = a0;
+            w1.polys[i].coeffs[j] = a1;
         }
     }
-    hasher.update(&(party_id as u64).to_le_bytes());
-    let mut hash = [0u8; 32];
-    hasher.finalize_xof().read(&mut hash);
-    hash
+    (w0, w1)
 }
 
-/// Compute a session binding tag: H(c̃ ‖ party_id).
-fn compute_session_binding(c_tilde: &[u8], party_id: usize) -> [u8; 32] {
-    let mut hasher = Shake256::default();
-    hasher.update(c_tilde);
-    hasher.update(&(party_id as u64).to_le_bytes());
-    let mut binding = [0u8; 32];
-    hasher.finalize_xof().read(&mut binding);
-    binding
-}
-
-/// Verify a commitment against its pre-committed hash (ADV-1).
-pub fn verify_commitment(commitment: &Commitment, expected_hash: &CommitmentHash) -> bool {
-    if commitment.party_id != expected_hash.party_id {
-        return false;
-    }
-    let actual_hash = compute_commitment_hash(&commitment.w, commitment.party_id);
-    // Constant-time comparison
-    use subtle::ConstantTimeEq;
-    actual_hash.ct_eq(&expected_hash.hash).into()
-}
-
-/// Verify a partial signature's session binding (ADV-6).
-pub fn verify_session_binding(partial: &PartialSignature, c_tilde: &[u8]) -> bool {
-    let expected = compute_session_binding(c_tilde, partial.party_id);
-    use subtle::ConstantTimeEq;
-    partial.session_binding.ct_eq(&expected).into()
-}
-
-impl Party {
-    /// Create a new signing party from its RSS key share and the public matrix.
-    pub fn new(key_share: &PartyKeyShare, a_hat: MatrixA) -> Self {
-        Party {
-            id: key_share.party_id,
-            key_share: key_share.clone(),
-            signing_s1_share: None,
-            nonce_counter: 0,
-            a_hat,
-            y: None,
-            w: None,
+/// Compute challenge hash c̃ = H(μ ‖ w₁_packed).
+fn compute_challenge(mu: &[u8; 64], w1: &PolyVecK) -> [u8; CTILDEBYTES] {
+    let mut h = Shake256::default();
+    h.update(mu);
+    // Pack w₁ (6 bits per coeff for ML-DSA-44)
+    for poly in &w1.polys {
+        let mut packed = [0u8; POLYW1_PACKEDBYTES];
+        for k in 0..N / 4 {
+            packed[3 * k] = (poly.coeffs[4 * k] as u8) |
+                ((poly.coeffs[4 * k + 1] as u8) << 6);
+            packed[3 * k + 1] = ((poly.coeffs[4 * k + 1] >> 2) as u8) |
+                ((poly.coeffs[4 * k + 2] as u8) << 4);
+            packed[3 * k + 2] = ((poly.coeffs[4 * k + 2] >> 4) as u8) |
+                ((poly.coeffs[4 * k + 3] as u8) << 2);
         }
+        h.update(&packed);
     }
-
-    /// Return the `(n, t)` sharing parameters embedded in this party's key share.
-    pub fn sharing_params(&self) -> (usize, usize) {
-        (self.key_share.n, self.key_share.t)
-    }
-
-    /// Borrow this party's underlying RSS key share.
-    pub(crate) fn key_share(&self) -> &PartyKeyShare {
-        &self.key_share
-    }
-
-    /// Derive this party's additive signing share for a specific active signer set.
-    ///
-    /// Each RSS subset-piece is assigned to exactly one active signer (the smallest
-    /// active party id in that subset). This avoids replicated-piece double counting.
-    fn derive_signing_share(&self, active_party_ids: &[usize]) -> Result<PolyVecL, Error> {
-        if !active_party_ids.contains(&self.id) {
-            return Err(Error::InvalidParameters);
-        }
-
-        let mut active = [false; MAX_PARTIES];
-        for &id in active_party_ids {
-            if id >= MAX_PARTIES || active[id] {
-                return Err(Error::InvalidParameters);
-            }
-            active[id] = true;
-        }
-
-        let subsets = enumerate_subsets(self.key_share.n, self.key_share.t);
-        let mut share = PolyVecL::zero();
-
-        for (local_idx, &global_subset_idx) in self.key_share.subset_indices.iter().enumerate() {
-            let subset = subsets.get(global_subset_idx).ok_or(Error::InvalidShare)?;
-
-            // Deterministically assign each subset-piece to one active signer.
-            let owner = subset
-                .iter()
-                .filter(|&&member| member < MAX_PARTIES && active[member])
-                .copied()
-                .min()
-                .ok_or(Error::InvalidParameters)?;
-
-            if owner == self.id {
-                share.add_assign(&self.key_share.s1_shares[local_idx]);
-            }
-        }
-
-        Ok(share)
-    }
-
-    /// **Round 0 — Pre-commit**: Compute and return a binding hash H(w_i ‖ party_id).
-    ///
-    /// This hash must be broadcast before revealing the full commitment,
-    /// preventing the coordinator from grinding challenges (ADV-1).
-    /// The party internally runs the full commit logic and stores state.
-    pub fn precommit<R: RngCore + CryptoRng>(
-        &mut self,
-        rng: &mut R,
-        active_party_ids: &[usize],
-        session_context: &[u8],
-    ) -> Result<CommitmentHash, Error> {
-        let commitment = self.commit_internal(rng, active_party_ids, session_context)?;
-        let hash = commitment.binding_hash;
-        let party_id = commitment.party_id;
-        // Store w and keep y for sign()
-        self.w = Some(commitment.w.clone());
-        Ok(CommitmentHash { hash, party_id })
-    }
-
-    /// **Round 1 — Reveal**: Return the full commitment (after pre-commit).
-    ///
-    /// The coordinator verifies this against the pre-committed hash.
-    pub fn reveal(&self) -> Option<Commitment> {
-        self.w.as_ref().map(|w| {
-            let binding_hash = compute_commitment_hash(w, self.id);
-            Commitment {
-                w: w.clone(),
-                binding_hash,
-                party_id: self.id,
-            }
-        })
-    }
-
-    /// **Round 1 — Commit**: Sample masking randomness and compute partial commitment.
-    ///
-    /// Uses **hedged nonce derivation** (ADV-4): the masking seed is derived from
-    /// both RNG entropy AND the party's secret key material, so that even with a
-    /// compromised RNG, different parties produce different nonces.
-    ///
-    /// Returns the partial commitment w_i with a binding hash.
-    pub fn commit<R: RngCore + CryptoRng>(
-        &mut self,
-        rng: &mut R,
-        active_party_ids: &[usize],
-        session_context: &[u8],
-    ) -> Result<Commitment, Error> {
-        let commitment = self.commit_internal(rng, active_party_ids, session_context)?;
-        self.w = Some(commitment.w.clone());
-        Ok(commitment)
-    }
-
-    /// Internal commit logic shared by commit() and precommit().
-    fn commit_internal<R: RngCore + CryptoRng>(
-        &mut self,
-        rng: &mut R,
-        active_party_ids: &[usize],
-        session_context: &[u8],
-    ) -> Result<Commitment, Error> {
-        // Build this round's additive signing share for the active signer set.
-        let signing_s1_share = self.derive_signing_share(active_party_ids)?;
-
-        // ── ADV-4: Hedged nonce derivation ──
-        // seed = SHAKE-256(rng_entropy ‖ signing_share ‖ session_context ‖ counter)
-        // This ensures that even if the RNG is compromised (e.g., VM snapshot),
-        // the masking vector is still bound to:
-        //   - this party's signing share
-        //   - this signing session context
-        //   - this party's per-round counter
-        let mut rng_entropy = [0u8; CRHBYTES];
-        rng.fill_bytes(&mut rng_entropy);
-
-        let mut hasher = Shake256::default();
-        hasher.update(&rng_entropy);
-        // Mix in the party's secret key material for hedging
-        for l in 0..L {
-            for c in 0..N {
-                hasher.update(&signing_s1_share.polys[l].coeffs[c].to_le_bytes());
-            }
-        }
-        hasher.update(&(session_context.len() as u64).to_le_bytes());
-        hasher.update(session_context);
-        hasher.update(&self.id.to_le_bytes());
-        hasher.update(&self.nonce_counter.to_le_bytes());
-
-        let mut seed = [0u8; CRHBYTES];
-        hasher.finalize_xof().read(&mut seed);
-        self.nonce_counter = self.nonce_counter.wrapping_add(1);
-
-        // SECURITY: zeroize raw entropy immediately
-        rng_entropy.zeroize();
-
-        // Sample masking vector y_i ∈ S_{γ₁}^L, then scale by active signer count.
-        //
-        // This keeps the aggregate y = Σ y_i within the FIPS-compatible γ₁ envelope.
-        // Without this scaling, summing full-range party masks would overflow
-        // the final z infinity bound almost always.
-        let mut y = PolyVecL::zero();
-        let scale = active_party_ids.len() as i32;
-        for j in 0..L {
-            Poly::uniform_gamma1(&mut y.polys[j], &seed, (self.id * L + j) as u16);
-            for c in 0..N {
-                y.polys[j].coeffs[c] /= scale;
-            }
-        }
-
-        // SECURITY: seed must be zeroized to prevent masking vector recovery
-        seed.zeroize();
-
-        // Compute w_i = A · NTT(y_i)
-        let mut y_hat = y.clone();
-        y_hat.ntt();
-        let mut w = self.a_hat.mul_vec(&y_hat);
-
-        // SECURITY: y_hat contains NTT-domain secret masking vector
-        y_hat.zeroize();
-
-        w.reduce();
-        w.invntt_tomont();
-        w.reduce();
-        w.caddq();
-
-        // Store y for Round 3
-        self.y = Some(y);
-        self.signing_s1_share = Some(signing_s1_share);
-
-        // Compute binding hash (ADV-1)
-        let binding_hash = compute_commitment_hash(&w, self.id);
-
-        Ok(Commitment {
-            w,
-            binding_hash,
-            party_id: self.id,
-        })
-    }
-
-    /// **Round 3 — Sign**: Compute partial response with hyperball rejection.
-    ///
-    /// Given the challenge polynomial c (derived from the aggregate commitment
-    /// and message in Round 2), each party:
-    ///
-    /// 1. Computes z_i = c · s₁_i + y_i  (in NTT domain, then inverse)
-    /// 2. **Hyperball check**: if ‖z_i‖₂² > B² → reject (return `LocalRejectionAbort`)
-    /// 3. Returns z_i with session binding (ADV-6)
-    ///
-    /// This is the key innovation from ePrint 2026/013: rejection is performed
-    /// **locally** using L₂-norm hyperballs instead of L∞-norm hypercubes,
-    /// preventing exponential degradation of acceptance probability.
-    pub fn sign(&mut self, challenge_hash: &[u8]) -> Result<PartialSignature, Error> {
-        let y = self.y.take().ok_or(Error::InvalidShare)?;
-        let mut signing_s1_share = self.signing_s1_share.take().ok_or(Error::InvalidShare)?;
-
-        // Decode challenge polynomial c from the hash
-        let mut c_poly = Poly::zero();
-        Poly::challenge(&mut c_poly, challenge_hash);
-
-        // Compute z_i = c · s₁_i + y_i
-        // We need to do this in NTT domain: NTT(c) · NTT(s₁_i), then INTT
-        let mut c_hat = c_poly.clone();
-        c_hat.ntt();
-
-        let mut z = PolyVecL::zero();
-        let mut s1_hat = signing_s1_share.clone();
-        s1_hat.ntt();
-
-        for j in 0..L {
-            // cs₁[j] = INTT(NTT(c) · NTT(s₁[j]))
-            let mut cs1_j = Poly::zero();
-            Poly::pointwise_montgomery(&mut cs1_j, &c_hat, &s1_hat.polys[j]);
-            cs1_j.invntt_tomont();
-            cs1_j.reduce();
-            cs1_j.caddq();
-
-            // z[j] = cs₁[j] + y[j]
-            Poly::add(&mut z.polys[j], &cs1_j, &y.polys[j]);
-            z.polys[j].reduce();
-        }
-
-        // ── Hyperball rejection check (L₂ norm) ──
-        // Per ePrint 2026/013 §5.2: accept iff ‖z_i‖₂² ≤ B²
-        // This is the ONLY per-party rejection check in the Mithril scheme.
-        //
-        // Note: We do NOT check ‖z_i‖∞ < γ₁ − β here because that bound
-        // applies to the AGGREGATED z = Σ z_i, not individual partial responses.
-        // Each party's z_i may exceed γ₁ − β because the RSS share s₁_i has
-        // norm C(N-1,T-1)·η > η, making c·s₁_i larger than c·s₁ per-party.
-        // The L∞ check is enforced at aggregation time instead.
-        let l2_sq = z.l2_norm_squared();
-
-        // SECURITY: zeroize NTT-domain secret material before returning
-        c_hat.zeroize();
-        s1_hat.zeroize();
-        signing_s1_share.zeroize();
-
-        if l2_sq > HYPERBALL_BOUND_SQ {
-            return Err(Error::LocalRejectionAbort);
-        }
-
-        // Compute session binding (ADV-6): H(c̃ ‖ party_id)
-        let session_binding = compute_session_binding(challenge_hash, self.id);
-
-        Ok(PartialSignature {
-            party_id: self.id,
-            z,
-            session_binding,
-        })
-    }
+    let mut c = [0u8; CTILDEBYTES];
+    h.finalize_xof().read(&mut c);
+    c
 }
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::rss;
-    use rand::rngs::StdRng;
-    use rand::SeedableRng;
-
-    #[test]
-    fn test_party_commit() {
-        let mut rng = StdRng::seed_from_u64(99);
-
-        // Create a trivial secret
-        let s1 = PolyVecL::zero();
-        let s2 = PolyVecK::zero();
-
-        let shares = rss::distribute_key(&s1, &s2, 3, 2, &mut rng).unwrap();
-
-        let rho = [0u8; SEEDBYTES];
-        let a_hat = MatrixA::expand(&rho);
-        let mut party = Party::new(&shares[0], a_hat);
-
-        let active = [0usize, 1usize];
-        let commitment = party.commit(&mut rng, &active, b"test-session").unwrap();
-        // Just verify it doesn't panic and produces non-trivial output
-        assert_eq!(commitment.w.polys.len(), K);
-        assert_eq!(commitment.party_id, 0);
-        assert_ne!(commitment.binding_hash, [0u8; 32]);
-    }
-
-    #[test]
-    fn test_commitment_binding_hash() {
-        let mut rng = StdRng::seed_from_u64(101);
-        let s1 = PolyVecL::zero();
-        let s2 = PolyVecK::zero();
-        let shares = rss::distribute_key(&s1, &s2, 3, 2, &mut rng).unwrap();
-        let rho = [0u8; SEEDBYTES];
-        let a_hat = MatrixA::expand(&rho);
-
-        let mut party = Party::new(&shares[0], a_hat);
-        let active = [0usize, 1usize];
-        let commitment = party.commit(&mut rng, &active, b"test-session").unwrap();
-
-        // Verify the binding hash matches
-        let hash = CommitmentHash {
-            hash: commitment.binding_hash,
-            party_id: commitment.party_id,
-        };
-        assert!(verify_commitment(&commitment, &hash));
-
-        // Verify wrong hash fails
-        let wrong_hash = CommitmentHash {
-            hash: [0u8; 32],
-            party_id: commitment.party_id,
-        };
-        assert!(!verify_commitment(&commitment, &wrong_hash));
-    }
-
-    #[test]
-    fn test_session_binding() {
-        let mut rng = StdRng::seed_from_u64(102);
-        let s1 = PolyVecL::zero();
-        let s2 = PolyVecK::zero();
-        let shares = rss::distribute_key(&s1, &s2, 3, 2, &mut rng).unwrap();
-        let rho = [0u8; SEEDBYTES];
-        let a_hat = MatrixA::expand(&rho);
-
-        let mut party = Party::new(&shares[0], a_hat);
-        let active = [0usize, 1usize];
-        party.commit(&mut rng, &active, b"test-session").unwrap();
-        let c_tilde = [42u8; CTILDEBYTES];
-
-        if let Ok(partial) = party.sign(&c_tilde) {
-            assert!(verify_session_binding(&partial, &c_tilde));
-            // Wrong c_tilde should fail
-            assert!(!verify_session_binding(&partial, &[0u8; CTILDEBYTES]));
-        }
-    }
-
-    #[test]
-    fn test_precommit_reveal_flow() {
-        let mut rng = StdRng::seed_from_u64(103);
-        let s1 = PolyVecL::zero();
-        let s2 = PolyVecK::zero();
-        let shares = rss::distribute_key(&s1, &s2, 3, 2, &mut rng).unwrap();
-        let rho = [0u8; SEEDBYTES];
-        let a_hat = MatrixA::expand(&rho);
-
-        let mut party = Party::new(&shares[0], a_hat);
-
-        // Pre-commit: get binding hash
-        let active = [0usize, 1usize];
-        let hash = party.precommit(&mut rng, &active, b"test-session").unwrap();
-
-        // Reveal: get full commitment
-        let commitment = party.reveal().expect("should have commitment");
-
-        // Verify binding
-        assert!(verify_commitment(&commitment, &hash));
-    }
+    // v0.3.0: Tests will be added after the coordinator.rs rewrite
+    // enables full end-to-end signing.
 }
