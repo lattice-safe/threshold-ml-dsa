@@ -2,10 +2,10 @@
 
 > **Based on:** FIPS 204 (ML-DSA) + ePrint 2026/013 (Mithril Scheme)
 >
-> This document describes the complete cryptographic protocol implemented in
-> `threshold-ml-dsa`, covering key generation, key distribution via Replicated
-> Secret Sharing, the hardened 4-round threshold signing protocol, adversarial
-> defenses, and verification.
+> This document describes the cryptographic protocol implemented in
+> `threshold-ml-dsa` v0.3.0, covering fresh key generation via Replicated
+> Secret Sharing, the 3-round threshold signing protocol with K-parallel
+> hyperball commitments, and FIPS 204-compatible verification.
 
 ---
 
@@ -63,13 +63,15 @@
 | Rounding bits | $d$ | $13$ | Power2Round parameter |
 | Hint budget | $\omega$ | $80$ | Max hint ones |
 
-### Threshold-Specific Parameters
+### Threshold-Specific Parameters (Figure 8)
 
-| Parameter | Symbol | Value | Description |
-|-----------|--------|-------|-------------|
-| Max parties | $N_{\max}$ | $6$ | Upper bound on $N$ |
-| Hyperball bound | $B^2$ | $\ell \cdot n \cdot \gamma_1^2$ | Per-party L₂ rejection |
-|  |  | $= 17{,}592{,}186{,}044{,}416$ | $\approx 1.76 \times 10^{13}$ |
+| Parameter | Symbol | Description |
+|-----------|--------|-------------|
+| Max parties | $N_{\max}$ | $6$ (upper bound on $N$) |
+| K repetitions | $K$ | Parallel commitment slots (2–100, depends on (T,N)) |
+| Hyperball radius | $r$ | ν-scaled L₂ norm bound for response rejection |
+| Commitment radius | $r_1$ | ν-scaled L₂ norm bound for randomness sampling |
+| Expansion factor | $\nu$ | 3 for ML-DSA-44 (scales first L·N coordinates) |
 
 ---
 
@@ -226,17 +228,17 @@ $$|\mathcal{S}_M| = \binom{N}{M} = \binom{N}{N-T+1}$$
 
 $$M=2,\ \mathcal{S}_2 = \left\{ \{0,1\},\ \{0,2\},\ \{1,2\} \right\} \qquad |\mathcal{S}_2| = 3$$
 
-### 5.2 Share Distribution
+### 5.2 Share Distribution (v0.3 — Paper-Faithful)
 
-Given secret $\mathbf{s} \in R_q^\ell$ with $\lVert \mathbf{s} \rVert_\infty \leq \eta$:
+In v0.3, secrets are generated **fresh and independently** per subset from a shared seed.
+This matches the paper's Figure 4 construction:
 
-$$\text{For each } S \in \mathcal{S}_M \text{ except the last: sample } \mathbf{s}^{(S)} \xleftarrow{\$} [-\eta, \eta]^{n \cdot \ell}$$
+$$\text{For each } S \in \mathcal{S}_M: \quad \mathbf{s}_1^{(S)} \xleftarrow{\text{SHAKE-256}} [-\eta, \eta]^{n \cdot \ell}$$
 
-$$\text{Last share: } \mathbf{s}^{(S_{\text{last}})} = \mathbf{s} - \sum_{S \neq S_{\text{last}}} \mathbf{s}^{(S)}$$
+The per-subset secrets are sampled independently using SHAKE-256 with a domain-separated
+nonce per subset. The total secret is defined as:
 
-**Additive reconstruction property:**
-
-$$\sum_{S \in \mathcal{S}_M} \mathbf{s}^{(S)} = \mathbf{s}$$
+$$\mathbf{s}_1 = \sum_{S \in \mathcal{S}_M} \mathbf{s}_1^{(S)}, \qquad \mathbf{s}_2 = \sum_{S \in \mathcal{S}_M} \mathbf{s}_2^{(S)}$$
 
 **Party $i$ receives:** all shares $\mathbf{s}^{(S)}$ for subsets $S \ni i$.
 
@@ -281,188 +283,178 @@ graph LR
 
 ---
 
-## 6. Threshold Key Generation
+## 6. Threshold Key Generation (v0.3 — Figure 4)
 
 ```mermaid
 flowchart TD
-    A["Trusted Dealer generates seed"] --> B["KeyGen(seed) → pk, sk"]
-    B --> C["Parse sk → ρ, K, tr, s₁, s₂, t₀"]
-    C --> D["RSS.distribute(s₁, s₂, N, T)"]
-    D --> E1["Party 0: share₀"]
-    D --> E2["Party 1: share₁"]
-    D --> E3["Party 2: share₂"]
-    E1 & E2 & E3 --> F["Each party stores replicated share pieces"]
-    F --> G["Per-sign session derives assigned signing share"]
+    A["Seed (32 bytes)"] --> B["SHAKE-256 → ρ, per-subset nonces"]
+    B --> C["Enumerate all C(N, N-T+1) subsets"]
+    C --> D["For each subset S: sample s₁⁽ˢ⁾, s₂⁽ˢ⁾ ← χ_η"]
+    D --> E["s₁ = Σ s₁⁽ˢ⁾, s₂ = Σ s₂⁽ˢ⁾"]
+    E --> F["A ← ExpandA(ρ)"]
+    F --> G["t = A·s₁ + s₂"]
+    G --> H["pk = Pack(ρ, Power2Round(t).1)"]
+    H --> I["tr = SHAKE-256(pk)"]
+    I --> J1["Party 0: {s⁽ˢ⁾ | 0 ∈ S}, ρ, tr"]
+    I --> J2["Party 1: {s⁽ˢ⁾ | 1 ∈ S}, ρ, tr"]
+    I --> J3["Party 2: {s⁽ˢ⁾ | 2 ∈ S}, ρ, tr"]
     
     style A fill:#ff6b6b,color:#fff
-    style B fill:#ffa94d,color:#fff
     style D fill:#51cf66,color:#fff
-    style G fill:#339af0,color:#fff
+    style H fill:#339af0,color:#fff
 ```
 
 ### Step-by-Step
 
-**Step 1 — Standard Key Generation:**
+**Step 1 — Derive seed material:**
 
-$$(\rho, \rho', K) \leftarrow \text{SHAKE-256}(\text{seed})$$
+$$(\rho, \text{nonce\_base}) \leftarrow \text{SHAKE-256}(\text{seed})$$
+
+**Step 2 — Fresh per-subset secret generation:**
+
+For each subset $S \in \mathcal{S}_M$ (enumerated via Gosper's hack bitmask):
+
+$$\mathbf{s}_1^{(S)} \leftarrow \text{SHAKE-256}(\text{seed} \| S)_{\eta} \quad \text{(independently)}$$
+$$\mathbf{s}_2^{(S)} \leftarrow \text{SHAKE-256}(\text{seed} \| S)_{\eta} \quad \text{(independently)}$$
+
+> **Note:** No existing ML-DSA key is decomposed. All secrets are fresh.
+
+**Step 3 — Compute public key:**
+
+$$\mathbf{s}_1 = \sum_{S} \mathbf{s}_1^{(S)}, \quad \mathbf{s}_2 = \sum_{S} \mathbf{s}_2^{(S)}$$
 $$\mathbf{A} \leftarrow \text{ExpandA}(\rho)$$
-$$\mathbf{s}_1 \leftarrow \text{CBD}_\eta(\rho'), \quad \mathbf{s}_2 \leftarrow \text{CBD}_\eta(\rho')$$
 $$\mathbf{t} = \mathbf{A}\mathbf{s}_1 + \mathbf{s}_2$$
-$$pk = (\rho, \mathbf{t}_1), \quad tr = H(pk)$$
+$$pk = (\rho, \text{Power2Round}(\mathbf{t}).1), \quad tr = \text{SHAKE-256}(pk)$$
 
-**Step 2 — RSS Distribution:**
+**Step 4 — Distribute to parties:**
 
-$$\text{For each } S \in \mathcal{S}_M \setminus \{S_{\text{last}}\}: \quad \mathbf{s}_1^{(S)} \xleftarrow{\$} [-\eta, \eta]^{n \cdot \ell}$$
-$$\mathbf{s}_1^{(S_\text{last})} = \mathbf{s}_1 - \sum_{S \neq S_\text{last}} \mathbf{s}_1^{(S)}$$
-
-$$\text{Identically for } \mathbf{s}_2$$
-
-**Step 3 — Party Initialization:**
-
-$$\mathbf{s}^{\text{hold}}_{1,i} = \sum_{\substack{S \ni i}} \mathbf{s}_1^{(S)}, \qquad \mathbf{s}^{\text{hold}}_{2,i} = \sum_{\substack{S \ni i}} \mathbf{s}_2^{(S)}$$
-$$\hat{\mathbf{A}} = \text{NTT}(\mathbf{A})$$
+$$\text{Party } i \text{ receives: } \{\mathbf{s}_1^{(S)}, \mathbf{s}_2^{(S)} : i \in S\}, \rho, tr$$
 
 ---
 
-## 7. Threshold Signing Protocol (4 Rounds)
+## 7. Threshold Signing Protocol (3 Rounds + K-Parallel)
 
-The protocol runs in **4 rounds** between a coordinator and an active signer set $\mathcal{A}$ of size $T$ (chosen from available parties). The implementation retries over qualifying signer sets and fails closed if no verifiable aggregate is found.
+The v0.3 protocol runs in **3 rounds** with **K parallel commitment slots** per round.
+This follows the construction in ePrint 2026/013 exactly.
 
-### 7.0 Round 0 — Pre-Commit (ADV-1: Commitment Binding)
+### 7.1 Round 1 — Commit (K Parallel Hyperball Commitments)
 
-Each party $P_i$ independently:
+Each party $P_i$ independently generates K commitments:
 
-**Hedged nonce derivation (ADV-4):**
+**Sample K hyperball vectors:**
 
-$$\text{seed}_i = \text{SHAKE-256}(\text{rng\_entropy} \| \mathbf{s}^{\text{sign}}_{1,i} \| \text{session\_context} \| i \| \text{counter}_i)$$
+For $k = 0, \ldots, K-1$:
 
-This binds the masking seed to fresh entropy, signing-share material, session context, and a local counter to mitigate RNG rollback/reuse.
+$$(\mathbf{r}_k, \mathbf{e}_k) \leftarrow \text{SampleHyperball}(r_1, \nu, \rho', k)$$
 
-**Sample masking vector:**
+where SampleHyperball uses the Box-Muller transform to generate a Gaussian direction
+vector, then normalizes and scales to radius $r_1$. The first $L \cdot N$
+coordinates are scaled by $\nu$ to account for the response magnification.
 
-$$\mathbf{y}_i \leftarrow \text{ExpandMask}(\text{seed}_i) \in S_{\gamma_1}^\ell$$
+**Compute K commitments:**
 
-**Compute partial commitment:**
-
-$$\hat{\mathbf{y}}_i = \text{NTT}(\mathbf{y}_i)$$
-$$\mathbf{w}_i = \text{NTT}^{-1}(\hat{\mathbf{A}} \circ \hat{\mathbf{y}}_i) \in R_q^k$$
+$$\mathbf{w}_{i,k} = \mathbf{A} \cdot \mathbf{r}_k + \mathbf{e}_k \in R_q^k$$
 
 **Compute binding hash:**
 
-$$h_i = \text{SHAKE-256}(\mathbf{w}_i \| i)$$
+$$h_i = \text{SHAKE-256}(tr \| i \| \mathbf{w}_{i,0} \| \ldots \| \mathbf{w}_{i,K-1})$$
 
-**Send** $h_i$ to coordinator. **Store** $\mathbf{y}_i$ and $\mathbf{w}_i$ locally.
+**Send** $h_i$ to coordinator. **Store** K FVec samples locally.
 
-### 7.1 Round 1 — Reveal Commitments
+### 7.2 Round 2 — Reveal
 
-After all binding hashes are collected:
+**Send** all K packed commitment vectors $\mathbf{w}_{i,k}$ to coordinator.
 
-**Send** full commitment $\mathbf{w}_i$ to coordinator.
+**Compute** $\mu = \text{CRH}(tr \| \text{msg})$.
 
-**Coordinator verifies** each commitment against its pre-committed hash:
-
-$$\text{SHAKE-256}(\mathbf{w}_i \| i) \stackrel{?}{=} h_i \quad \text{(constant-time)}$$
-
-This prevents the coordinator from selectively including/excluding parties to grind for a favorable challenge.
-
-### 7.2 Round 2 — Challenge (Coordinator)
-
-The coordinator computes:
-
-**Aggregate commitment:**
-
-$$\mathbf{w} = \sum_{i \in \mathcal{A}} \mathbf{w}_i$$
-
-**Extract high bits and pack (reference-faithful layout):**
-
-$$\mathbf{w}_1 = \text{HighBits}(\mathbf{w}, 2\gamma_2)$$
-
-$$\text{w1\_packed} = \text{polyw1\_pack}(\mathbf{w}_1)$$
-
-**Fiat-Shamir challenge:**
-
-$$\mu = \text{SHAKE-256}(tr \| \text{msg})$$
-
-$$\tilde{c} = \text{SHAKE-256}(\mu \| \text{w1\_packed})$$
-
-$$c = \text{SampleInBall}(\tilde{c}) \in R_q \quad \text{(exactly } \tau \text{ coefficients} \in \{-1, +1\}\text{)}$$
-
-**Broadcast** $\tilde{c}$ to all parties.
-
-### 7.3 Round 3 — Sign (with Local Rejection + Session Binding)
+### 7.3 Round 3 — Respond (K Parallel with FVec Rejection)
 
 Each party $P_i \in \mathcal{A}$:
 
-**Decode challenge:**
+**Recover partial secret** via Algorithm 6 (balanced partition):
 
-$$c = \text{SampleInBall}(\tilde{c})$$
+$$\{S_1, \ldots, S_m\} \leftarrow \text{RSSRecover}(\mathcal{A}, N, T)$$
 
-**Compute partial response:**
+$$(\mathbf{s}_{1,I}, \mathbf{s}_{2,I}) = \sum_{j \in \text{partition}[i]} (\mathbf{s}_1^{(S_j)}, \mathbf{s}_2^{(S_j)})$$
 
-$$\hat{c} = \text{NTT}(c)$$
-$$\hat{\mathbf{s}}^{\text{sign}}_{1,i} = \text{NTT}(\mathbf{s}^{\text{sign}}_{1,i})$$
-$$\text{For } j = 0, \ldots, \ell-1:$$
-$$\quad (c \cdot \mathbf{s}^{\text{sign}}_{1,i})_j = \text{NTT}^{-1}(\hat{c} \circ \hat{\mathbf{s}}^{\text{sign}}_{1,i,j})$$
-$$\quad \mathbf{z}_{i,j} = (c \cdot \mathbf{s}^{\text{sign}}_{1,i})_j + \mathbf{y}_{i,j}$$
+**For each** $k = 0, \ldots, K-1$:
 
-**Hyperball rejection check:**
+1. Decompose $\mathbf{w}_{\text{final},k}$ and compute challenge:
 
-$$\lVert \mathbf{z}_i \rVert_2^2 = \sum_{j=0}^{\ell-1} \sum_{m=0}^{n-1} \text{center}(\mathbf{z}_{i,j,m})^2$$
+$$\tilde{c}_k = \text{SHAKE-256}(\mu \| \text{pack}(\text{HighBits}(\mathbf{w}_{\text{final},k})))$$
 
-$$\text{If } \lVert \mathbf{z}_i \rVert_2^2 > B^2: \quad \text{REJECT (abort locally)}$$
+$$c_k = \text{SampleInBall}(\tilde{c}_k)$$
 
-**Compute session binding (ADV-6):**
+2. Compute response as FVec:
 
-$$\text{binding}_i = \text{SHAKE-256}(\tilde{c} \| i)$$
+$$\mathbf{z}^{(f)}_{i,k} = (c_k \cdot \mathbf{s}_{1,I},\ c_k \cdot \mathbf{s}_{2,I}) + \text{FVec}_k$$
 
-**If accepted:** Send $(\mathbf{z}_i, \text{binding}_i)$ to coordinator.
+3. ν-scaled hyperball rejection:
+
+$$\text{If } \text{Excess}(\mathbf{z}^{(f)}_{i,k}, r, \nu): \quad \mathbf{z}_{i,k} \leftarrow \mathbf{0}$$
+
+where $\text{Excess}(\mathbf{v}, r, \nu)$ computes:
+
+$$\sum_{j < L \cdot N} \frac{v_j^2}{\nu^2} + \sum_{j \geq L \cdot N} v_j^2 > r^2$$
+
+**Send** K response vectors $\{\mathbf{z}_{i,k}\}$ to coordinator.
 
 > [!IMPORTANT]
-> The L∞ check $\lVert \mathbf{z}_i \rVert_\infty < \gamma_1 - \beta$ is **not** applied per-party.
-> It applies only to the **aggregated** $\mathbf{z}$.
->
-> Implementation note: each RSS subset-piece is deterministically assigned to one
-> active signer (smallest active party id in that subset), producing
-> $\mathbf{s}^{\text{sign}}_{1,i}$ and preventing replicated-piece double counting.
+> The L∞ check $\lVert \mathbf{z} \rVert_\infty < \gamma_1 - \beta$ is applied only to the
+> **aggregated** $\mathbf{z}$ by the coordinator, not per-party.
+> Share assignment uses balanced partitions (Algorithm 6) to prevent double-counting.
 
 ---
 
-## 8. Hyperball Rejection Sampling
+## 8. Hyperball Rejection Sampling (FVec + Box-Muller)
 
 ### The Exponential Degradation Problem
 
 Standard ML-DSA uses **hypercube** rejection: accept iff $\lVert \mathbf{z} \rVert_\infty < \gamma_1 - \beta$.
 
-In a threshold setting with $N$ parties, each performing independent L∞-rejection, the combined acceptance probability is:
+In a threshold setting with $T$ parties, each performing independent L∞-rejection, the combined acceptance probability is:
 
-$$p_{\text{cube}} = \left(\frac{\gamma_1 - \beta}{\gamma_1}\right)^{N \cdot \ell \cdot n}$$
+$$p_{\text{cube}} = \left(\frac{\gamma_1 - \beta}{\gamma_1}\right)^{T \cdot \ell \cdot n}$$
 
-This decays **exponentially** in $N$ — for $N = 3$, $p_{\text{cube}}$ is negligible.
+This decays **exponentially** in $T$ — for $T = 3$, $p_{\text{cube}}$ is negligible.
 
-### The Hyperball Solution
+### The Hyperball Solution (ePrint 2026/013)
 
-Replace the hypercube with a **hyperball** (L₂-norm ball):
+Replace the hypercube with a **ν-scaled hyperball** using float vectors (FVec):
 
-$$\text{Accept iff } \lVert \mathbf{z}_i \rVert_2^2 \leq B^2$$
+$$\text{Accept iff } \sum_{j < L \cdot N} \frac{z_j^2}{\nu^2} + \sum_{j \geq L \cdot N} z_j^2 \leq r^2$$
 
-where $B^2 = \ell \cdot n \cdot \gamma_1^2$.
+The ν-scaling accounts for the larger response magnitudes in the first $L \cdot N$
+coordinates (which correspond to the transmitted z vector).
 
-**Expected value** of $\lVert \mathbf{z}_i \rVert_2^2$ (dominated by uniform $\mathbf{y}_i$):
+### SampleHyperball (Box-Muller)
 
-$$\mathbb{E}[\lVert \mathbf{z}_i \rVert_2^2] \approx \ell \cdot n \cdot \frac{\gamma_1^2}{3} = \frac{B^2}{3}$$
+To sample uniformly on the hyperball surface:
 
-The bound is $3\times$ the expected value, improving acceptance versus naive per-party
-L∞ checks. Actual protocol success still depends on aggregate signer behavior and retry policy.
+1. Generate $d + 2$ Gaussian samples via Box-Muller transform
+2. Scale the first $L \cdot N$ coordinates by $\nu$
+3. Normalize to the unit sphere
+4. Scale by radius $r_1$
 
-### Numerical Values (ML-DSA-44)
+This produces a uniformly distributed point on the surface of the ν-scaled
+hyperball, matching the Go reference `SampleHyperball()` function.
 
-| Quantity | Value |
-|----------|-------|
-| $\ell \cdot n$ | $4 \times 256 = 1{,}024$ |
-| $\gamma_1^2$ | $131{,}072^2 = 1.72 \times 10^{10}$ |
-| $B^2 = \ell \cdot n \cdot \gamma_1^2$ | $1.76 \times 10^{13}$ |
-| $\mathbb{E}[\lVert \mathbf{z}_i \rVert_2^2]$ | $\approx 5.86 \times 10^{12}$ |
-| Ratio $\mathbb{E}/B^2$ | $\approx 0.33$ |
+### K-Parallel Amortization
+
+Instead of retrying the entire protocol on rejection, each party generates **K**
+independent hyperball samples. The coordinator tries each of the K slots,
+accepting the first one that produces a valid FIPS 204 signature. This
+dramatically improves per-round success probability.
+
+### Numerical Values (ML-DSA-44, from Figure 8)
+
+| (T, N) | K | Radius r | Per-slot acceptance |
+|--------|---|----------|---------------------|
+| (2, 2) | 2 | 252,778 | ~50% |
+| (3, 3) | 5 | 252,131 | ~20% |
+| (4, 4) | 14 | 251,338 | ~7% |
+| (5, 5) | 42 | 250,590 | ~2.4% |
+| (6, 6) | 100 | 250,590 | ~1% |
 
 ---
 
@@ -847,33 +839,30 @@ an error if no verifiable aggregate is produced within the configured retry budg
 
 ---
 
-## 15. SDK Integration Layer
+## 15. SDK Integration Layer (v0.3)
 
-The crate now exposes a high-level SDK module: `threshold_ml_dsa::sdk`.
+The crate exposes a high-level SDK module: `threshold_ml_dsa::sdk`.
 
-### Goals
+### Primary SDK Type
 
-- Provide an application-friendly API for common workflows.
-- Preserve the exact same cryptographic core and fail-closed semantics.
-- Keep low-level modules available for custom distributed deployments.
-
-### Primary SDK Types
-
-- `MlDsa44ThresholdMaterial`
-  - Extracts `(rho, tr, s1, s2)` from a standard ML-DSA-44 keypair.
-  - Supports `from_secret_key(pk, sk)` and `from_seed(seed)`.
 - `ThresholdMlDsa44Sdk`
-  - Builds and owns `N` parties for threshold signing.
-  - Exposes `sign(msg, rng)` and `verify(msg, sig)`.
-  - Enforces fail-closed behavior through the same coordinator path.
+  - Created via `from_seed(seed, t, n, max_retries)`
+  - Generates N parties with fresh per-subset secrets
+  - Exposes `threshold_sign(active, msg, rng)` and `verify(msg, sig)`
+  - Enforces fail-closed behavior: every signature is verified by the FIPS 204
+    verifier before being returned
 
 ### Mapping to Core Protocol
 
-- `ThresholdMlDsa44Sdk::new(...)`
-  - Runs RSS distribution (`rss::distribute_key`)
-  - Builds party state machines (`sign::Party`)
-- `ThresholdMlDsa44Sdk::sign(...)`
-  - Calls `coordinator::threshold_sign` (hardened 4-round flow)
+- `ThresholdMlDsa44Sdk::from_seed(...)`
+  - Calls `rss::keygen_from_seed()` (Figure 4 fresh keygen)
+  - Produces `ThresholdPrivateKey` for each party
+- `ThresholdMlDsa44Sdk::threshold_sign(active, msg, rng)`
+  - Round 1: `sign::round1()` — K hyperball commitments per party
+  - Round 2: `sign::round2()` — reveal + μ computation
+  - Round 3: `sign::round3()` — K responses with FVec rejection
+  - Combine: `coordinator::combine()` — K-parallel aggregation
+  - Verify: `verify::verify()` — fail-closed FIPS 204 check
 - `ThresholdMlDsa44Sdk::verify(...)`
   - Calls `verify::verify` (standard FIPS 204 verifier path)
 
@@ -888,5 +877,6 @@ be transported with authenticated encryption and replay protection.
 > **References:**
 >
 > - NIST FIPS 204 — _Module-Lattice-Based Digital Signature Standard_ (2024)
-> - ePrint 2026/013 — _Mithril: Threshold ML-DSA via Replicated Secret Sharing_
-> - [`dilithium-rs`](https://crates.io/crates/dilithium-rs) — Pure-Rust FIPS 204 implementation (used for NTT, Montgomery reduction, and canonical verification)
+> - ePrint 2026/013 — _Efficient Threshold ML-DSA via Replicated Secret Sharing_
+> - [Threshold-ML-DSA (Go)](https://github.com/cloudflare/circl/tree/main/sign/mldsa/threshold) — Reference Go implementation
+> - [`dilithium-rs`](https://crates.io/crates/dilithium-rs) — Pure-Rust FIPS 204 implementation
