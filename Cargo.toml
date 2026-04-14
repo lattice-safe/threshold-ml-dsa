@@ -1,0 +1,28 @@
+[package]
+name = "threshold-ml-dsa"
+version = "0.1.0"
+edition = "2021"
+description = "Threshold ML-DSA (FIPS 204) via the Mithril scheme (ePrint 2026/013)"
+authors = ["Suleyman Kardas <suleyman@lattice-safe.com>", "DeepMind AAC"]
+repository = "https://github.com/lattice-safe/threshold-ml-dsa"
+categories = ["cryptography", "cryptography::post-quantum", "no-std"]
+keywords = ["fips-204", "ml-dsa", "threshold", "mithril", "post-quantum"]
+license = "MIT"
+readme = "README.md"
+
+[dependencies]
+rand_core = { version = "0.6", default-features = false }
+zeroize = { version = "1", default-features = false, features = ["derive"] }
+sha3 = { version = "0.10", default-features = false }
+subtle = { version = "2", default-features = false }
+
+# Pure-Rust FIPS 204 implementation — NTT, Montgomery reduction, and canonical verification
+# https://crates.io/crates/dilithium-rs
+dilithium-rs = { path = "../dilithium-rs" }
+
+[dev-dependencies]
+rand = "0.8"
+
+[features]
+default = ["std"]
+std = []

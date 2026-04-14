@@ -1,0 +1,28 @@
+[package]
+name = "threshold-ml-dsa-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+
+[dependencies.threshold-ml-dsa]
+path = ".."
+
+[[bin]]
+name = "fuzz_target_1"
+path = "fuzz_targets/fuzz_target_1.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "deserialize_fuzzer"
+path = "fuzz_targets/deserialize_fuzzer.rs"
+test = false
+doc = false
+bench = false
