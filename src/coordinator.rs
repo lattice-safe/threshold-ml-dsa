@@ -307,6 +307,64 @@ fn compute_c_tilde(mu: &[u8; 64], w1: &PolyVecK) -> [u8; CTILDEBYTES] {
 
 #[cfg(test)]
 mod tests {
-    // v0.3.0: End-to-end tests will be added after wiring the full
-    // round1 → round2 → round3 → combine pipeline.
+    use super::*;
+
+    #[test]
+    fn test_aggregate_commitments_zero() {
+        // Two parties, K=2 slots, all zero → result should be all zero
+        let w_zero = PolyVecK::zero();
+        let party0 = vec![w_zero.clone(), w_zero.clone()];
+        let party1 = vec![w_zero.clone(), w_zero.clone()];
+        let all = vec![party0, party1];
+        let wfinals = aggregate_commitments(&all, 2);
+        assert_eq!(wfinals.len(), 2);
+        for wf in &wfinals {
+            for i in 0..K {
+                for j in 0..N {
+                    assert_eq!(wf.polys[i].coeffs[j], 0);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_aggregate_commitments_additive() {
+        let mut w_a = PolyVecK::zero();
+        let mut w_b = PolyVecK::zero();
+        w_a.polys[0].coeffs[0] = 100;
+        w_b.polys[0].coeffs[0] = 200;
+        let party0 = vec![w_a];
+        let party1 = vec![w_b];
+        let wfinals = aggregate_commitments(&[party0, party1], 1);
+        assert_eq!(wfinals[0].polys[0].coeffs[0], 300);
+    }
+
+    #[test]
+    fn test_aggregate_responses_zero() {
+        let z_zero = PolyVecL::zero();
+        let party0 = vec![z_zero.clone()];
+        let party1 = vec![z_zero.clone()];
+        let all = vec![party0, party1];
+        let zfinals = aggregate_responses(&all, 1);
+        assert_eq!(zfinals.len(), 1);
+        for i in 0..L {
+            for j in 0..N {
+                assert_eq!(zfinals[0].polys[i].coeffs[j], 0);
+            }
+        }
+    }
+
+    #[test]
+    fn test_aggregate_responses_additive() {
+        let mut z_a = PolyVecL::zero();
+        let mut z_b = PolyVecL::zero();
+        z_a.polys[0].coeffs[0] = 1000;
+        z_a.polys[1].coeffs[5] = 2000;
+        z_b.polys[0].coeffs[0] = 3000;
+        z_b.polys[1].coeffs[5] = 4000;
+        let all = vec![vec![z_a], vec![z_b]];
+        let zfinals = aggregate_responses(&all, 1);
+        assert_eq!(zfinals[0].polys[0].coeffs[0], 4000);
+        assert_eq!(zfinals[0].polys[1].coeffs[5], 6000);
+    }
 }

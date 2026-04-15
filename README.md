@@ -164,13 +164,13 @@ cargo test --test v03_tests
 | Hyperball sampling | 2 | Norm bound, excess check |
 | FVec roundtrip | 1 | Poly ↔ FVec centering and reconstruction |
 | SDK | 2 | Creation, invalid parameter rejection |
-| **End-to-end threshold sign** | **4** | **(2,2), (2,3), (4,6), (5,6): `threshold_sign` must return `Ok(sig)` and pass FIPS 204 verification** |
+| **End-to-end threshold sign** | **6** | **(2,2), (2,3), (3,3), (3,4), (4,6), (5,6): `threshold_sign` + FIPS 204 verify** |
+| Sign unit tests | 5 | pack/unpack roundtrip, bitmask, mu determinism |
+| Coordinator unit tests | 4 | aggregate_commitments, aggregate_responses (zero + additive) |
 | Poly arithmetic | 6 | Add, sub, center, norms, power2round |
 | Params | 4 | Lookup, binomial, num_subsets, rejection |
 | Doctest | 1 | Usage example compilation |
-| **Total (table above)** | **29** | **All passing** |
-
-Current full `cargo test` output includes additional regression/instrumentation suites and is higher than the core v0.3 table above.
+| **Total** | **40+** | **All passing (`cargo test` runs 70+ including ported coverage suite)** |
 
 ## Security Notes
 

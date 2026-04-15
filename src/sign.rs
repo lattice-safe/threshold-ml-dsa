@@ -285,8 +285,8 @@ pub fn round3(
     let mut zs: Vec<PolyVecL> = Vec::with_capacity(k_reps);
 
     for (i, wfinal) in wfinals.iter().enumerate().take(k_reps) {
-        // Decompose w into w₀, w₁
-        let (_, w1) = decompose_veck(wfinal);
+        // Decompose w — only w₁ is needed for the challenge hash.
+        let w1 = decompose_w1_only(wfinal);
 
         // c̃ = H(μ ‖ w₁_packed)
         let c_tilde = compute_challenge(&st_rd2.mu, &w1);
@@ -484,12 +484,12 @@ fn recover_partial_secret(sk: &ThresholdPrivateKey, assigned_masks: &[u8]) -> (P
     (s1h, s2h)
 }
 
-/// Decompose a PolyVecK into (w₀, w₁) using the FIPS 204 reference decompose.
+/// Extract only w1 (HighBits) from a PolyVecK, skipping the unused w0 copy.
 ///
-/// CRITICAL: This MUST produce bit-identical results to the coordinator’s
-/// `dilithium::rounding::decompose()`, otherwise the challenge hash c̃ will
+/// CRITICAL: This MUST produce bit-identical results to the coordinator's
+/// `dilithium::rounding::decompose()`, otherwise the challenge hash will
 /// differ between round3 and combine, causing 100% delta rejection.
-fn decompose_veck(w: &PolyVecK) -> (PolyVecK, PolyVecK) {
+fn decompose_w1_only(w: &PolyVecK) -> PolyVecK {
     use dilithium::{polyvec::polyveck_decompose, polyvec::PolyVecK as DPolyVecK, ML_DSA_44};
     let mode = ML_DSA_44;
 
@@ -502,13 +502,11 @@ fn decompose_veck(w: &PolyVecK) -> (PolyVecK, PolyVecK) {
     let mut w0_ref = DPolyVecK::default();
     polyveck_decompose(mode, &mut w1_ref, &mut w0_ref, &w_ref);
 
-    let mut w0 = PolyVecK::zero();
     let mut w1 = PolyVecK::zero();
     for i in 0..K {
-        w0.polys[i].coeffs = w0_ref.vec[i].coeffs;
         w1.polys[i].coeffs = w1_ref.vec[i].coeffs;
     }
-    (w0, w1)
+    w1
 }
 
 /// Compute challenge hash c̃ = H(μ ‖ w₁_packed).
@@ -533,6 +531,61 @@ fn compute_challenge(mu: &[u8; 64], w1: &PolyVecK) -> [u8; CTILDEBYTES] {
 
 #[cfg(test)]
 mod tests {
-    // v0.3.0: Tests will be added after the coordinator.rs rewrite
-    // enables full end-to-end signing.
+    use super::*;
+
+    #[test]
+    fn test_pack_unpack_w_roundtrip() {
+        let mut w = PolyVecK::zero();
+        for i in 0..K {
+            for j in 0..N {
+                w.polys[i].coeffs[j] = ((i * N + j) as i32 * 137) % Q;
+            }
+        }
+        let packed = pack_w_single(&w);
+        let recovered = unpack_w_single(&packed);
+        for i in 0..K {
+            for j in 0..N {
+                assert_eq!(
+                    recovered.polys[i].coeffs[j],
+                    w.polys[i].coeffs[j],
+                    "w pack/unpack mismatch at [{i}][{j}]"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_pack_w_single_size_matches() {
+        let size = pack_w_single_size();
+        let w = PolyVecK::zero();
+        let packed = pack_w_single(&w);
+        assert_eq!(packed.len(), size);
+    }
+
+    #[test]
+    fn test_bitmask_to_sorted_ids_basic() {
+        let ids = bitmask_to_sorted_ids(0b0111, 4);
+        assert_eq!(ids, vec![0, 1, 2]);
+        let ids = bitmask_to_sorted_ids(0b1010, 4);
+        assert_eq!(ids, vec![1, 3]);
+        let ids = bitmask_to_sorted_ids(0, 6);
+        assert!(ids.is_empty());
+    }
+
+    #[test]
+    fn test_compute_mu_deterministic() {
+        let tr = [42u8; TRBYTES];
+        let msg = b"test message";
+        let mu1 = compute_mu(&tr, msg);
+        let mu2 = compute_mu(&tr, msg);
+        assert_eq!(mu1, mu2, "compute_mu must be deterministic");
+    }
+
+    #[test]
+    fn test_compute_mu_different_messages() {
+        let tr = [42u8; TRBYTES];
+        let mu1 = compute_mu(&tr, b"message A");
+        let mu2 = compute_mu(&tr, b"message B");
+        assert_ne!(mu1, mu2, "different messages must produce different mu");
+    }
 }

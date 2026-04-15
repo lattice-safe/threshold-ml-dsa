@@ -243,3 +243,46 @@ fn test_end_to_end_threshold_sign_5_6() {
         "5-of-6 threshold signature failed verification"
     );
 }
+
+#[test]
+fn test_end_to_end_threshold_sign_3_3() {
+    use rand::rngs::StdRng;
+    use rand::SeedableRng;
+
+    let seed = [33u8; 32];
+    let sdk = ThresholdMlDsa44Sdk::from_seed(&seed, 3, 3, 64).unwrap();
+
+    let mut rng = StdRng::seed_from_u64(333333);
+    let msg = b"threshold 3-of-3 all parties must sign";
+    let active = [0u8, 1, 2];
+
+    let sig = sdk
+        .threshold_sign(&active, msg, &mut rng)
+        .expect("3-of-3 threshold_sign should produce a valid signature");
+    assert!(
+        sdk.verify(msg, &sig),
+        "3-of-3 threshold signature failed verification"
+    );
+}
+
+#[test]
+fn test_end_to_end_threshold_sign_3_4() {
+    use rand::rngs::StdRng;
+    use rand::SeedableRng;
+
+    let seed = [34u8; 32];
+    let sdk = ThresholdMlDsa44Sdk::from_seed(&seed, 3, 4, 64).unwrap();
+
+    let mut rng = StdRng::seed_from_u64(343434);
+    let msg = b"threshold 3-of-4 partial quorum test";
+    // Use parties 0, 2, 3 (non-contiguous active set)
+    let active = [0u8, 2, 3];
+
+    let sig = sdk
+        .threshold_sign(&active, msg, &mut rng)
+        .expect("3-of-4 threshold_sign should produce a valid signature");
+    assert!(
+        sdk.verify(msg, &sig),
+        "3-of-4 threshold signature failed verification"
+    );
+}

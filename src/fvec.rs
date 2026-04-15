@@ -86,6 +86,10 @@ impl FVec {
     ///
     /// Computes: Σ_i (x_i / ν)² for i < L·N, plus Σ_i x_i² for i ≥ L·N.
     /// Returns true if the sum exceeds r².
+    ///
+    /// The final comparison uses IEEE 754 bit-level ordering to avoid
+    /// a branch on the secret-dependent result. Both operands are
+    /// non-negative, so `to_bits()` preserves the total order.
     pub fn excess(&self, r: f64, nu: f64) -> bool {
         let mut sq = 0.0f64;
         for i in 0..(L + K) {
@@ -98,7 +102,13 @@ impl FVec {
                 }
             }
         }
-        sq > r * r
+        // Branchless comparison: for non-negative f64, to_bits() is
+        // monotonic, so `a > b` ⟺ `a.to_bits() > b.to_bits()`.
+        // The wrapping_sub produces a borrow (high bit set) iff lhs ≤ rhs.
+        let lhs = sq.to_bits();
+        let rhs = (r * r).to_bits();
+        // excess iff lhs > rhs, i.e. rhs.wrapping_sub(lhs) has the high bit set
+        (rhs.wrapping_sub(lhs) >> 63) == 1
     }
 }
 

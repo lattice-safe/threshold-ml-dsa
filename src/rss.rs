@@ -405,57 +405,6 @@ fn enumerate_subsets_helper(
     }
 }
 
-// ─── Legacy types for backward compatibility ───────────────────────────
-
-/// Legacy party key share type (v0.2 API). Superseded by ThresholdPrivateKey.
-#[derive(Clone, Zeroize)]
-#[zeroize(drop)]
-pub struct PartyKeyShare {
-    #[zeroize(skip)]
-    pub party_id: usize,
-    #[zeroize(skip)]
-    pub n: usize,
-    #[zeroize(skip)]
-    pub t: usize,
-    pub s1_shares: Vec<PolyVecL>,
-    pub s2_shares: Vec<PolyVecK>,
-    #[zeroize(skip)]
-    pub subset_indices: Vec<usize>,
-}
-
-impl core::fmt::Debug for PartyKeyShare {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        write!(
-            f,
-            "PartyKeyShare {{ party_id: {}, n: {}, t: {}, shares: {} }}",
-            self.party_id,
-            self.n,
-            self.t,
-            self.s1_shares.len()
-        )
-    }
-}
-
-impl PartyKeyShare {
-    /// Compute this party's "effective" s₁ share by summing all share pieces.
-    pub fn effective_s1(&self) -> PolyVecL {
-        let mut result = PolyVecL::zero();
-        for share in &self.s1_shares {
-            result.add_assign(share);
-        }
-        result
-    }
-
-    /// Compute this party's "effective" s₂ share by summing all share pieces.
-    pub fn effective_s2(&self) -> PolyVecK {
-        let mut result = PolyVecK::zero();
-        for share in &self.s2_shares {
-            result.add_assign(share);
-        }
-        result
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
