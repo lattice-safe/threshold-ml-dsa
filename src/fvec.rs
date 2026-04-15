@@ -168,8 +168,8 @@ pub fn sample_hyperball(out: &mut FVec, radius: f64, nu: f64, rhop: &[u8; 64], n
 
     // Normalize to the sphere surface and scale to radius
     let factor = radius / libm::sqrt(sq);
-    for i in 0..FVEC_DIM {
-        out.coeffs[i] = samples[i] * factor;
+    for (i, sample) in samples.iter().enumerate().take(FVEC_DIM) {
+        out.coeffs[i] = sample * factor;
     }
 }
 

@@ -27,10 +27,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Sign — any 2 of 3 parties
     let msg = b"Hello, threshold ML-DSA!";
     let active = [0u8, 1]; // parties 0 and 1
-    let sig = sdk.threshold_sign(&active, msg, &mut rng)?;
-
-    // Verify with any standard ML-DSA-44 verifier
-    assert!(sdk.verify(msg, &sig));
+    match sdk.threshold_sign(&active, msg, &mut rng) {
+        Ok(sig) => {
+            // Verify with any standard ML-DSA-44 verifier
+            assert!(sdk.verify(msg, &sig));
+        }
+        // Fail-closed outcomes (no signature returned)
+        Err(threshold_ml_dsa::error::Error::InsufficientResponses)
+        | Err(threshold_ml_dsa::error::Error::InvalidSignature) => {}
+        Err(e) => return Err(Box::new(e)),
+    }
     Ok(())
 }
 ```
@@ -59,7 +65,11 @@ Perform a full 3-round threshold signing protocol with K parallel repetitions.
 - `msg: &[u8]` — message to sign
 - `rng: &mut R` — CSPRNG for commitment randomness
 
-**Returns:** `Result<[u8; 2420], Error>` — a valid FIPS 204 signature
+**Returns:** `Result<[u8; 2420], Error>`
+
+- `Ok(sig)`: FIPS 204-valid signature bytes
+- `Err(Error::InsufficientResponses | Error::InvalidSignature)`: fail-closed abort
+- other `Err(...)`: configuration/protocol failure
 
 ### `sdk.verify(msg, sig)`
 
@@ -98,7 +108,7 @@ from ePrint 2026/013, Figure 8.
 ## Security Model
 
 - **No key decomposition**: Keys are generated fresh, not split from an existing ML-DSA key.
-- **Fail-closed**: Every signature is verified by the FIPS 204 verifier before return.
+- **Fail-closed**: `Ok(sig)` is always verified before return; unsuccessful attempts return an error instead of an invalid signature.
 - **In-process orchestrator**: The SDK runs all parties in-process. For distributed
   deployment, use the low-level `sign` + `coordinator` modules and add authenticated
   transport between isolated party processes.

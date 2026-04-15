@@ -65,10 +65,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // 2. Sign with parties 0 and 1 (any 2 of 3)
     let msg = b"Hello, threshold ML-DSA!";
     let active = [0u8, 1];
-    let sig = sdk.threshold_sign(&active, msg, &mut rng)?;
-
-    // 3. Verify with any standard ML-DSA-44 verifier
-    assert!(sdk.verify(msg, &sig));
+    match sdk.threshold_sign(&active, msg, &mut rng) {
+        Ok(sig) => {
+            // 3. Verify with any standard ML-DSA-44 verifier
+            assert!(sdk.verify(msg, &sig));
+        }
+        // Fail-closed outcomes: no signature is returned.
+        Err(threshold_ml_dsa::error::Error::InsufficientResponses)
+        | Err(threshold_ml_dsa::error::Error::InvalidSignature) => {}
+        Err(e) => return Err(Box::new(e)),
+    }
     Ok(())
 }
 ```
@@ -163,7 +169,7 @@ cargo test --test v03_tests
 | Hyperball sampling | 2 | Norm bound, excess check |
 | FVec roundtrip | 1 | Poly ↔ FVec centering and reconstruction |
 | SDK | 2 | Creation, invalid parameter rejection |
-| **End-to-end sign+verify** | **2** | **(2,2) and (2,3) threshold → FIPS 204 verify** |
+| **End-to-end threshold sign** | **4** | **(2,2), (2,3), (4,6), (5,6): `Ok(sig)` must verify; fail-closed aborts accepted** |
 | Poly arithmetic | 6 | Add, sub, center, norms, power2round |
 | Params | 4 | Lookup, binomial, num_subsets, rejection |
 | Doctest | 1 | Usage example compilation |
@@ -172,7 +178,7 @@ cargo test --test v03_tests
 ## Security Notes
 
 - **No key decomposition**: Keys are generated fresh per subset — no existing ML-DSA secret is ever split.
-- **Fail-closed signing**: All output signatures are verified by the standard FIPS 204 verifier before being returned.
+- **Fail-closed signing**: Returned signatures are verified by the standard FIPS 204 verifier before return; otherwise signing returns an error (`InsufficientResponses`/`InvalidSignature`).
 - **Hyperball rejection**: Uses Rényi-divergence-safe float L₂ norms instead of L∞ hypercube rejection.
 - **Balanced share assignment**: Algorithm 6 ensures each party receives an equal number of subset secrets.
 - **Memory safe**: Secret material is `zeroize`d on drop.

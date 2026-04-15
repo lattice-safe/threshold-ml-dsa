@@ -109,6 +109,7 @@ pub fn combine(
             matrix_expand, matrix_pointwise_montgomery,
         },
         packing::{unpack_pk, pack_sig},
+        rounding,
         ML_DSA_44,
     };
 
@@ -140,11 +141,17 @@ pub fn combine(
             continue; // exceeds bound
         }
 
+        // Check z is not all-zero (hyperball rejection)
+        let all_zero = zfinals[k].polys.iter().all(|p| p.coeffs.iter().all(|&c| c == 0));
+        if all_zero {
+            continue;
+        }
+
         // Compute c̃ = H(μ ‖ w1_packed)
         let (_, w1) = decompose_polyveck(&wfinals[k]);
         let c_tilde = compute_c_tilde(&mu, &w1);
 
-        // Convert z to dilithium-rs format
+        // Convert z to dilithium-rs format and NTT
         let mut zh_d = DPolyVecL::default();
         for i in 0..L {
             for j in 0..N {
@@ -153,103 +160,77 @@ pub fn combine(
             zh_d.vec[i].ntt();
         }
 
-        // Compute Az in NTT domain
-        let mut az = DPolyVecK::default();
-        matrix_pointwise_montgomery(mode, &mut az, &mat, &zh_d);
+        // Compute w_approx = Az - c·t₁·2^d
+        // Mirror the FIPS 204 verifier exactly (all in NTT domain first):
+        // 1. w_approx = A * NTT(z) (pointwise in NTT domain)
+        let mut w_approx = DPolyVecK::default();
+        matrix_pointwise_montgomery(mode, &mut w_approx, &mat, &zh_d);
+
+        // 2. cp = NTT(SampleInBall(c̃))
+        let mut cp = DPoly::default();
+        DPoly::challenge(mode, &mut cp, &c_tilde);
+        cp.ntt();
+
+        // 3. ct1 = cp * NTT(t1 << d) in NTT domain
+        // 4. w_approx = w_approx - ct1 (still in NTT domain)
         for i in 0..K {
-            az.vec[i].reduce();
-            az.vec[i].invntt_tomont();
+            let mut t1_shifted = t1.vec[i].clone();
+            t1_shifted.shiftl();
+            t1_shifted.ntt();
+            let mut ct1 = DPoly::default();
+            DPoly::pointwise_montgomery(&mut ct1, &cp, &t1_shifted);
+
+            let w_copy = w_approx.vec[i].clone();
+            DPoly::sub(&mut w_approx.vec[i], &w_copy, &ct1);
         }
 
-        // Expand challenge c
-        let mut ch = DPoly::default();
-        DPoly::challenge(mode, &mut ch, &c_tilde);
-        ch.ntt();
-
-        // Compute Az - 2^d · c · t₁
-        let mut az2dct1 = DPolyVecK::default();
+        // 5. reduce → invntt → caddq (single pass, matching verifier)
         for i in 0..K {
-            // t1 * 2^d
-            az2dct1.vec[i] = t1.vec[i].clone();
-            az2dct1.vec[i].shiftl();
-            az2dct1.vec[i].ntt();
-            let tmp = az2dct1.vec[i].clone();
-            DPoly::pointwise_montgomery(&mut az2dct1.vec[i], &tmp, &ch);
+            w_approx.vec[i].reduce();
+            w_approx.vec[i].invntt_tomont();
+            w_approx.vec[i].caddq();
         }
-        // approx_w = Az - 2^d·c·t₁
-        for i in 0..K {
-            let tmp = az2dct1.vec[i].clone();
-            DPoly::sub(&mut az2dct1.vec[i], &az.vec[i], &tmp);
-            az2dct1.vec[i].reduce();
-            az2dct1.vec[i].invntt_tomont();
-            az2dct1.vec[i].caddq();
-        }
+        // Now w_approx = Az - c·t₁·2^d in normal domain, [0, Q)
 
-        // δ = approx_w - w_final
-        let mut delta_exceeds = false;
-        let mut f = DPolyVecK::default();
-        for i in 0..K {
-            for j in 0..N {
-                let wf = if wfinals[k].polys[i].coeffs[j] < 0 {
-                    wfinals[k].polys[i].coeffs[j] + Q
-                } else {
-                    wfinals[k].polys[i].coeffs[j]
-                };
-                f.vec[i].coeffs[j] = az2dct1.vec[i].coeffs[j] - wf;
-                // Center
-                if f.vec[i].coeffs[j] > Q / 2 {
-                    f.vec[i].coeffs[j] -= Q;
-                } else if f.vec[i].coeffs[j] < -(Q / 2) {
-                    f.vec[i].coeffs[j] += Q;
-                }
-                if f.vec[i].coeffs[j].unsigned_abs() as i32 >= GAMMA2 {
-                    delta_exceeds = true;
-                }
-            }
-        }
-
-        if delta_exceeds {
-            continue;
-        }
-
-        // Compute w₀ + f, then make hint
-        let (w0, w1_dec) = decompose_polyveck(&wfinals[k]);
-        let mut w0pf = DPolyVecK::default();
-        for i in 0..K {
-            for j in 0..N {
-                let w0_val = if w0.polys[i].coeffs[j] < 0 {
-                    w0.polys[i].coeffs[j] + Q
-                } else {
-                    w0.polys[i].coeffs[j]
-                };
-                w0pf.vec[i].coeffs[j] = w0_val + f.vec[i].coeffs[j];
-                // Normalize
-                if w0pf.vec[i].coeffs[j] < 0 {
-                    w0pf.vec[i].coeffs[j] += Q;
-                } else if w0pf.vec[i].coeffs[j] >= Q {
-                    w0pf.vec[i].coeffs[j] -= Q;
-                }
-            }
-        }
-
-        // Make hint
+        // Compute hints:
+        // Decompose w_approx to get HighBits(w_approx). If this differs
+        // from w₁ (used to compute c̃), set the hint bit.
+        // UseHint will correct HighBits(w_approx) by ±1 based on the
+        // sign of LowBits(w_approx), arriving at the correct w₁.
         let mut hint = DPolyVecK::default();
-        let mut w1_d = DPolyVecK::default();
-        for i in 0..K {
-            for j in 0..N {
-                w1_d.vec[i].coeffs[j] = w1_dec.polys[i].coeffs[j];
-            }
-        }
         let mut hint_pop = 0usize;
         for i in 0..K {
-            hint_pop += DPoly::make_hint(mode, &mut hint.vec[i], &w0pf.vec[i], &w1_d.vec[i]);
+            for j in 0..N {
+                let (wa1, wa0) = rounding::decompose(mode, w_approx.vec[i].coeffs[j]);
+                let target = w1.polys[i].coeffs[j];
+                if wa1 != target {
+                    hint.vec[i].coeffs[j] = 1;
+                    hint_pop += 1;
+                    // Verify the hint correction goes in the right direction
+                    let corrected = if wa0 > 0 {
+                        if wa1 == 43 { 0 } else { wa1 + 1 }
+                    } else if wa1 == 0 {
+                        43
+                    } else {
+                        wa1 - 1
+                    };
+                    if corrected != target {
+                        // Hint correction doesn't fix it — this slot is invalid
+                        hint_pop = OMEGA + 1; // Force rejection
+                        break;
+                    }
+                }
+            }
+            if hint_pop > OMEGA {
+                break;
+            }
         }
 
         if hint_pop > OMEGA {
             continue;
         }
 
-        // Success! Pack the signature
+        // Success! Pack the signature  
         let mut z_d = DPolyVecL::default();
         for i in 0..L {
             for j in 0..N {
