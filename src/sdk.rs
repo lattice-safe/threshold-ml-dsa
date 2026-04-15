@@ -176,26 +176,30 @@ impl ThresholdMlDsa44Sdk {
                 all_reveals.push(party_ws);
             }
 
-            let wfinals = coordinator::aggregate_commitments(&all_reveals, k_reps);
+            let wfinals = match coordinator::aggregate_commitments(&all_reveals, k_reps) {
+                Ok(v) => v,
+                Err(_) => continue 'attempt,
+            };
 
             // ── Round 3: Each party computes K responses ──
+            // Drain rd1_states: round3 consumes nonce state to prevent replay.
             let mut all_responses: Vec<Vec<PolyVecL>> = Vec::with_capacity(t);
-            for (idx, &party_id) in active.iter().enumerate() {
+            for (st1, (&party_id, st2)) in rd1_states
+                .into_iter()
+                .zip(active.iter().zip(rd2_states.iter()))
+            {
                 let sk = &self.sks[party_id as usize];
-                let zs = match sign::round3(
-                    sk,
-                    &wfinals,
-                    &rd1_states[idx],
-                    &rd2_states[idx],
-                    &self.params,
-                ) {
+                let zs = match sign::round3(sk, &wfinals, st1, st2, &self.params) {
                     Ok(v) => v,
                     Err(_) => continue 'attempt,
                 };
                 all_responses.push(zs);
             }
 
-            let zfinals = coordinator::aggregate_responses(&all_responses, k_reps);
+            let zfinals = match coordinator::aggregate_responses(&all_responses, k_reps) {
+                Ok(v) => v,
+                Err(_) => continue 'attempt,
+            };
 
             // ── Combine: try each of K slots ──
             match coordinator::combine(&self.pk, msg, &wfinals, &zfinals, &self.params) {

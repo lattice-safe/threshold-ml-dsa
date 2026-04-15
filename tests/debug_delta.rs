@@ -70,24 +70,27 @@ fn trace_one_attempt() {
         all_reveals.push(party_ws);
     }
 
-    let wfinals = threshold_ml_dsa::coordinator::aggregate_commitments(&all_reveals, k_reps);
+    let wfinals = threshold_ml_dsa::coordinator::aggregate_commitments(&all_reveals, k_reps).unwrap();
 
     // Round 3
     let mut all_responses = Vec::new();
-    for (idx, &party_id) in active.iter().enumerate() {
+    for (st1, (&party_id, st2)) in rd1_states
+        .into_iter()
+        .zip(active.iter().zip(rd2_states.iter()))
+    {
         let sk = &sdk.sks[party_id as usize];
         let zs = threshold_ml_dsa::sign::round3(
             sk,
             &wfinals,
-            &rd1_states[idx],
-            &rd2_states[idx],
+            st1,
+            st2,
             &sdk.params,
         )
         .unwrap();
         all_responses.push(zs);
     }
 
-    let zfinals = threshold_ml_dsa::coordinator::aggregate_responses(&all_responses, k_reps);
+    let zfinals = threshold_ml_dsa::coordinator::aggregate_responses(&all_responses, k_reps).unwrap();
 
     // Check each slot
     for k in 0..k_reps {

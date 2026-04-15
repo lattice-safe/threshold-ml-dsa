@@ -34,7 +34,9 @@
     clippy::unreadable_literal,
     clippy::needless_continue,
     clippy::manual_let_else,
-    clippy::missing_errors_doc
+    clippy::missing_errors_doc,
+    clippy::items_after_statements,
+    clippy::needless_pass_by_value
 )]
 
 #[cfg(not(feature = "std"))]

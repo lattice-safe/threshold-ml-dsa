@@ -53,11 +53,17 @@ impl Signature {
 /// Aggregate K commitment vectors from T parties.
 ///
 /// For each k ∈ [0, K): wfinal[k] = `Σ_i` w_{i,k}
-#[must_use] 
+///
+/// Returns `Err(InvalidParameters)` if any party has fewer than `k_reps` reveals.
 pub fn aggregate_commitments(
     all_reveals: &[Vec<PolyVecK>], // [T parties][K slots]
     k_reps: usize,
-) -> Vec<PolyVecK> {
+) -> Result<Vec<PolyVecK>, Error> {
+    for party_reveals in all_reveals {
+        if party_reveals.len() < k_reps {
+            return Err(Error::InvalidParameters);
+        }
+    }
     let mut wfinals: Vec<PolyVecK> = Vec::with_capacity(k_reps);
     for k in 0..k_reps {
         let mut w = PolyVecK::zero();
@@ -67,17 +73,23 @@ pub fn aggregate_commitments(
         w.reduce();
         wfinals.push(w);
     }
-    wfinals
+    Ok(wfinals)
 }
 
 /// Aggregate K response vectors from T parties.
 ///
 /// For each k ∈ [0, K): zfinal[k] = `Σ_i` z_{i,k}
-#[must_use] 
+///
+/// Returns `Err(InvalidParameters)` if any party has fewer than `k_reps` responses.
 pub fn aggregate_responses(
     all_responses: &[Vec<PolyVecL>], // [T parties][K slots]
     k_reps: usize,
-) -> Vec<PolyVecL> {
+) -> Result<Vec<PolyVecL>, Error> {
+    for party_responses in all_responses {
+        if party_responses.len() < k_reps {
+            return Err(Error::InvalidParameters);
+        }
+    }
     let mut zfinals: Vec<PolyVecL> = Vec::with_capacity(k_reps);
     for k in 0..k_reps {
         let mut z = PolyVecL::zero();
@@ -87,7 +99,7 @@ pub fn aggregate_responses(
         z.reduce();
         zfinals.push(z);
     }
-    zfinals
+    Ok(zfinals)
 }
 
 /// Combine: try each of the K parallel slots to produce a valid signature.
@@ -106,6 +118,10 @@ pub fn combine(
     zfinals: &[PolyVecL],
     params: &ThresholdParams,
 ) -> Result<[u8; SIG_BYTES], Error> {
+    let k_reps = params.k_reps as usize;
+    if wfinals.len() < k_reps || zfinals.len() < k_reps {
+        return Err(Error::InvalidParameters);
+    }
     use dilithium::{
         packing::{pack_sig, unpack_pk},
         poly::Poly as DPoly,
@@ -319,7 +335,7 @@ mod tests {
         let party0 = vec![w_zero.clone(), w_zero.clone()];
         let party1 = vec![w_zero.clone(), w_zero.clone()];
         let all = vec![party0, party1];
-        let wfinals = aggregate_commitments(&all, 2);
+        let wfinals = aggregate_commitments(&all, 2).unwrap();
         assert_eq!(wfinals.len(), 2);
         for wf in &wfinals {
             for i in 0..K {
@@ -338,7 +354,7 @@ mod tests {
         w_b.polys[0].coeffs[0] = 200;
         let party0 = vec![w_a];
         let party1 = vec![w_b];
-        let wfinals = aggregate_commitments(&[party0, party1], 1);
+        let wfinals = aggregate_commitments(&[party0, party1], 1).unwrap();
         assert_eq!(wfinals[0].polys[0].coeffs[0], 300);
     }
 
@@ -348,7 +364,7 @@ mod tests {
         let party0 = vec![z_zero.clone()];
         let party1 = vec![z_zero.clone()];
         let all = vec![party0, party1];
-        let zfinals = aggregate_responses(&all, 1);
+        let zfinals = aggregate_responses(&all, 1).unwrap();
         assert_eq!(zfinals.len(), 1);
         for i in 0..L {
             for j in 0..N {
@@ -366,8 +382,24 @@ mod tests {
         z_b.polys[0].coeffs[0] = 3000;
         z_b.polys[1].coeffs[5] = 4000;
         let all = vec![vec![z_a], vec![z_b]];
-        let zfinals = aggregate_responses(&all, 1);
+        let zfinals = aggregate_responses(&all, 1).unwrap();
         assert_eq!(zfinals[0].polys[0].coeffs[0], 4000);
         assert_eq!(zfinals[0].polys[1].coeffs[5], 6000);
+    }
+
+    #[test]
+    fn test_aggregate_commitments_rejects_short_input() {
+        let w = PolyVecK::zero();
+        let party0 = vec![w.clone()]; // only 1 slot
+        let result = aggregate_commitments(&[party0], 2); // asks for 2
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_aggregate_responses_rejects_short_input() {
+        let z = PolyVecL::zero();
+        let party0 = vec![z.clone()]; // only 1 slot
+        let result = aggregate_responses(&[party0], 2); // asks for 2
+        assert!(result.is_err());
     }
 }

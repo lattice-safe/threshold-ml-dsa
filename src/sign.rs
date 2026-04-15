@@ -183,7 +183,10 @@ pub fn round1<R: RngCore + CryptoRng>(
 
 /// Round 2: reveal commitments and compute μ.
 ///
-/// Verifies that all received commitment hashes match the party's Round 1 hashes.
+/// Verifies that this party's own reveal is bound to its Round 1 commitment.
+/// NOTE: Per-peer reveal verification is done separately via
+/// `verify_round2_reveal` -- callers in distributed settings MUST
+/// call it for every received reveal.
 /// Returns the packed commitment data and state for Round 3.
 #[allow(clippy::too_many_arguments)]
 pub fn round2(
@@ -256,10 +259,16 @@ pub fn verify_round2_reveal(
 ///
 /// Then applies the ν-scaled L₂ norm check: ‖`z_k‖₂` ≤ r.
 /// Responses that fail rejection are all-zero (coordinator will skip them).
+///
+/// # State Consumption
+///
+/// Takes `st_rd1` by value to enforce one-time use of the nonce randomness.
+/// Calling this function consumes the Round 1 state, preventing replay of
+/// the same hidden randomness with different coordinator-selected challenges.
 pub fn round3(
     sk: &ThresholdPrivateKey,
     wfinals: &[PolyVecK], // K aggregated commitment vectors
-    st_rd1: &StRound1,    // saved randomness from Round 1
+    st_rd1: StRound1,     // consumed: nonce randomness is single-use
     st_rd2: &StRound2,    // μ and active set from Round 2
     params: &ThresholdParams,
 ) -> Result<Vec<PolyVecL>, Error> {
