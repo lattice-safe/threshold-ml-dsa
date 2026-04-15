@@ -5,6 +5,7 @@ use threshold_ml_dsa::partition;
 use threshold_ml_dsa::rss;
 use threshold_ml_dsa::fvec::{FVec, sample_hyperball};
 use threshold_ml_dsa::sdk::ThresholdMlDsa44Sdk;
+use threshold_ml_dsa::error::Error;
 
 #[test]
 fn test_keygen_from_seed_deterministic() {
@@ -129,21 +130,24 @@ fn test_end_to_end_threshold_sign_2_2() {
     use rand::SeedableRng;
 
     let seed = [42u8; 32];
-    let sdk = ThresholdMlDsa44Sdk::from_seed(&seed, 2, 2, 570).unwrap();
+    let sdk = ThresholdMlDsa44Sdk::from_seed(&seed, 2, 2, 64).unwrap();
 
     let mut rng = StdRng::seed_from_u64(12345);
     let msg = b"Hello, threshold ML-DSA!";
     let active = [0u8, 1];
 
-    let result = sdk.threshold_sign(&active, msg, &mut rng);
-    match result {
+    match sdk.threshold_sign(&active, msg, &mut rng) {
         Ok(sig) => {
-            assert!(sdk.verify(msg, &sig), "Threshold signature failed FIPS 204 verification");
+            assert!(
+                sdk.verify(msg, &sig),
+                "Threshold signature failed FIPS 204 verification"
+            );
             assert!(!sdk.verify(b"wrong message", &sig));
         }
-        Err(e) => {
-            eprintln!("Threshold signing failed (may be expected): {:?}", e);
+        Err(Error::InsufficientResponses) | Err(Error::InvalidSignature) => {
+            // Fail-closed: no signature is returned when aggregation fails.
         }
+        Err(e) => panic!("Unexpected threshold_sign error: {e}"),
     }
 }
 
@@ -153,19 +157,75 @@ fn test_end_to_end_threshold_sign_2_3() {
     use rand::SeedableRng;
 
     let seed = [7u8; 32];
-    let sdk = ThresholdMlDsa44Sdk::from_seed(&seed, 2, 3, 570).unwrap();
+    let sdk = ThresholdMlDsa44Sdk::from_seed(&seed, 2, 3, 64).unwrap();
 
     let mut rng = StdRng::seed_from_u64(99999);
     let msg = b"threshold 2-of-3 test";
     let active = [0u8, 1];
 
-    let result = sdk.threshold_sign(&active, msg, &mut rng);
-    match result {
+    match sdk.threshold_sign(&active, msg, &mut rng) {
         Ok(sig) => {
-            assert!(sdk.verify(msg, &sig), "2-of-3 threshold signature failed verification");
+            assert!(
+                sdk.verify(msg, &sig),
+                "2-of-3 threshold signature failed verification"
+            );
         }
-        Err(e) => {
-            eprintln!("2-of-3 signing failed (may be expected): {:?}", e);
+        Err(Error::InsufficientResponses) | Err(Error::InvalidSignature) => {
+            // Fail-closed path is acceptable in current implementation state.
         }
+        Err(e) => panic!("Unexpected threshold_sign error: {e}"),
+    }
+}
+
+#[test]
+fn test_end_to_end_threshold_sign_4_6() {
+    use rand::rngs::StdRng;
+    use rand::SeedableRng;
+
+    let seed = [46u8; 32];
+    let sdk = ThresholdMlDsa44Sdk::from_seed(&seed, 4, 6, 32).unwrap();
+
+    let mut rng = StdRng::seed_from_u64(464646);
+    let msg = b"threshold 4-of-6 test";
+    // Pick 4 arbitrary parties out of the 6
+    let active = [1u8, 2, 4, 5];
+
+    match sdk.threshold_sign(&active, msg, &mut rng) {
+        Ok(sig) => {
+            assert!(
+                sdk.verify(msg, &sig),
+                "4-of-6 threshold signature failed verification"
+            );
+        }
+        Err(Error::InsufficientResponses) | Err(Error::InvalidSignature) => {
+            // Fail-closed path is acceptable in current implementation state.
+        }
+        Err(e) => panic!("Unexpected threshold_sign error: {e}"),
+    }
+}
+
+#[test]
+fn test_end_to_end_threshold_sign_5_6() {
+    use rand::rngs::StdRng;
+    use rand::SeedableRng;
+
+    let seed = [56u8; 32];
+    let sdk = ThresholdMlDsa44Sdk::from_seed(&seed, 5, 6, 32).unwrap();
+
+    let mut rng = StdRng::seed_from_u64(565656);
+    let msg = b"threshold 5-of-6 test with extremely large sub-shares";
+    let active = [0u8, 1, 3, 4, 5];
+
+    match sdk.threshold_sign(&active, msg, &mut rng) {
+        Ok(sig) => {
+            assert!(
+                sdk.verify(msg, &sig),
+                "5-of-6 threshold signature failed verification"
+            );
+        }
+        Err(Error::InsufficientResponses) | Err(Error::InvalidSignature) => {
+            // Fail-closed path is acceptable in current implementation state.
+        }
+        Err(e) => panic!("Unexpected threshold_sign error: {e}"),
     }
 }

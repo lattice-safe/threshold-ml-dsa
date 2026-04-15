@@ -33,8 +33,10 @@ use rand_core::{CryptoRng, RngCore};
 pub struct StRound1 {
     /// K packed commitment vectors (each is K polynomials in normal domain)
     pub w_packed: Vec<Vec<u8>>,
-    /// K FVec randomness samples (for computing responses)
-    pub cmtst: Vec<FVec>,
+    /// K randomness samples as rounded integer polynomials (y ∈ ℤ^L, e ∈ ℤ^K)
+    /// These are the SAME integer values used to compute w = A·y + e,
+    /// ensuring algebraic consistency in the response z = c·s + y.
+    pub rand_polys: Vec<(PolyVecL, PolyVecK)>,
 }
 
 /// Round 2 state saved by a party for use in Round 3.
@@ -77,8 +79,7 @@ pub fn round1<R: RngCore + CryptoRng>(
     rng.fill_bytes(&mut rhop);
 
     let k_reps = params.k_reps as usize;
-    let mut ws: Vec<PolyVecK> = Vec::with_capacity(k_reps);
-    let mut cmtst: Vec<FVec> = Vec::with_capacity(k_reps);
+    let mut rand_polys: Vec<(PolyVecL, PolyVecK)> = Vec::with_capacity(k_reps);
     let mut w_packed_all: Vec<Vec<u8>> = Vec::with_capacity(k_reps);
 
     // Expand A from ρ
@@ -89,27 +90,29 @@ pub fn round1<R: RngCore + CryptoRng>(
         // Sample from hyperball with radius r₁ (randomness ball)
         sample_hyperball(&mut fv, params.r1, params.nu, &rhop, i as u16);
 
-        // Split FVec into (r, e_) ∈ ℤ^L × ℤ^K
-        let mut r = PolyVecL::zero();
+        // Round FVec to integer polynomials (y, e_) ∈ ℤ^L × ℤ^K
+        // CRITICAL: These rounded integers are what we use for BOTH
+        // w = A·y + e_ (commitment) and z = c·s + y (response).
+        let mut y = PolyVecL::zero();
         let mut e_ = PolyVecK::zero();
-        fv.round_to_polyvecs(&mut r, &mut e_);
+        fv.round_to_polyvecs(&mut y, &mut e_);
 
-        // Compute w = A·r + e_
-        let mut rh = r.clone();
-        rh.ntt();
+        // Compute w = A·y + e_
+        let mut yh = y.clone();
+        yh.ntt();
         let mut w = PolyVecK::zero();
-        for j in 0..K {
-            // w[j] = Σ_l A[j][l] · rh[l] (pointwise in NTT domain)
+        for (j, a_row) in a.iter().enumerate().take(K) {
+            // w[j] = Σ_l A[j][l] · yh[l] (pointwise in NTT domain)
             let mut acc = Poly::zero();
-            for l in 0..L {
+            for (l, a_jl) in a_row.iter().enumerate().take(L) {
                 let mut prod = Poly::zero();
-                Poly::pointwise_montgomery(&mut prod, &a[j][l], &rh.polys[l]);
+                Poly::pointwise_montgomery(&mut prod, a_jl, &yh.polys[l]);
                 let acc_copy = acc.clone();
                 Poly::add(&mut acc, &acc_copy, &prod);
             }
             acc.reduce();
             acc.invntt_tomont();
-            // w[j] = A·r[j] + e_[j]
+            // w[j] = A·y[j] + e_[j]
             let acc_copy = acc.clone();
             Poly::add(&mut w.polys[j], &acc_copy, &e_.polys[j]);
         }
@@ -119,8 +122,7 @@ pub fn round1<R: RngCore + CryptoRng>(
         let packed = pack_w_single(&w);
         w_packed_all.push(packed);
 
-        ws.push(w);
-        cmtst.push(fv);
+        rand_polys.push((y, e_));
     }
 
     // Compute commitment hash: H(tr ‖ id ‖ w_packed_all)
@@ -133,7 +135,7 @@ pub fn round1<R: RngCore + CryptoRng>(
     let mut hash = [0u8; 32];
     h.finalize_xof().read(&mut hash);
 
-    Ok((hash, StRound1 { w_packed: w_packed_all, cmtst }))
+    Ok((hash, StRound1 { w_packed: w_packed_all, rand_polys }))
 }
 
 /// Round 2: reveal commitments and compute μ.
@@ -191,14 +193,17 @@ pub fn round3(
     let party_idx = active.iter().position(|&id| id == sk.id)
         .expect("Party must be in active set");
 
-    // Sum the shares assigned to this party by the partition
+    // Sum the shares assigned to this party by the partition.
+    // NOTE: recover_partial_secret returns values ALREADY in NTT domain
+    // because Share stores s1h = NTT(s1), so summing them gives NTT(Σ s1)
+    // directly. Do NOT NTT again — that would double-transform.
     let (s1h, s2h) = recover_partial_secret(sk, &partition[party_idx]);
 
     let mut zs: Vec<PolyVecL> = Vec::with_capacity(k_reps);
 
-    for i in 0..k_reps {
+    for (i, wfinal) in wfinals.iter().enumerate().take(k_reps) {
         // Decompose w into w₀, w₁
-        let (_, w1) = decompose_veck(&wfinals[i]);
+        let (_, w1) = decompose_veck(wfinal);
 
         // c̃ = H(μ ‖ w₁_packed)
         let c_tilde = compute_challenge(&st_rd2.mu, &w1);
@@ -208,38 +213,38 @@ pub fn round3(
         Poly::challenge(&mut ch, &c_tilde);
         ch.ntt();
 
-        // Compute c·s₁ (in NTT domain)
+        // Compute z = c·s₁ + y (integer arithmetic in NTT domain, then back)
         let mut z = PolyVecL::zero();
         for j in 0..L {
             Poly::pointwise_montgomery(&mut z.polys[j], &ch, &s1h.polys[j]);
             z.polys[j].invntt_tomont();
         }
         z.reduce();
+        // Add the integer randomness y from round1
+        z.add_assign(&st_rd1.rand_polys[i].0);
+        z.reduce();
 
-        // Compute c·s₂ (for the second half of the FVec)
-        let mut y = PolyVecK::zero();
+        // Compute c·s₂ + e_ (for the rejection check)
+        let mut cs2 = PolyVecK::zero();
         for j in 0..K {
-            Poly::pointwise_montgomery(&mut y.polys[j], &ch, &s2h.polys[j]);
-            y.polys[j].invntt_tomont();
+            Poly::pointwise_montgomery(&mut cs2.polys[j], &ch, &s2h.polys[j]);
+            cs2.polys[j].invntt_tomont();
         }
-        y.reduce();
+        cs2.reduce();
+        // Add the integer randomness e_ from round1
+        cs2.add_assign(&st_rd1.rand_polys[i].1);
+        cs2.reduce();
 
-        // Build FVec from (c·s₁, c·s₂) and add the randomness sample
-        let mut zf = FVec::from_polyvecs(&z, &y);
-        zf.add_assign(&st_rd1.cmtst[i]);
-
-        // Hyperball rejection: check ‖zf‖₂ ≤ r
+        // Hyperball rejection: convert to FVec and check ‖z̃‖₂ ≤ r
+        let zf = FVec::from_polyvecs(&z, &cs2);
         if zf.excess(params.r, params.nu) {
             // Rejection: emit zero response
             zs.push(PolyVecL::zero());
             continue;
         }
 
-        // Round FVec back to polynomial vector (only z part needed)
-        let mut z_out = PolyVecL::zero();
-        let mut _y_out = PolyVecK::zero();
-        zf.round_to_polyvecs(&mut z_out, &mut _y_out);
-        zs.push(z_out);
+        // Accepted — output z directly (already integer polynomials)
+        zs.push(z);
     }
 
     zs
@@ -259,16 +264,16 @@ fn expand_a(rho: &[u8; 32]) -> Vec<Vec<Poly>> {
 
     // Convert to our Poly format
     let mut a: Vec<Vec<Poly>> = Vec::with_capacity(K);
-    for i in 0..K {
-        let mut row = Vec::with_capacity(L);
+    for mat_row in mat.iter().take(K) {
+        let mut out_row = Vec::with_capacity(L);
         for j in 0..L {
             let mut p = Poly::zero();
             for c in 0..N {
-                p.coeffs[c] = mat[i].vec[j].coeffs[c];
+                p.coeffs[c] = mat_row.vec[j].coeffs[c];
             }
-            row.push(p);
+            out_row.push(p);
         }
-        a.push(row);
+        a.push(out_row);
     }
     a
 }
@@ -276,13 +281,13 @@ fn expand_a(rho: &[u8; 32]) -> Vec<Vec<Poly>> {
 
 /// Size of a single packed PolyVecK (23 bits per coefficient, K×N coefficients).
 pub fn pack_w_single_size() -> usize {
-    let poly_q_size = (N * 23 + 7) / 8;
+    let poly_q_size = (N * 23).div_ceil(8);
     K * poly_q_size
 }
 
 /// Pack a single PolyVecK as 23 bits per coefficient.
 pub fn pack_w_single(w: &PolyVecK) -> Vec<u8> {
-    let poly_q_size = (N * 23 + 7) / 8;
+    let poly_q_size = (N * 23).div_ceil(8);
     let total = K * poly_q_size;
     let mut buf = alloc::vec![0u8; total];
 
@@ -357,47 +362,56 @@ fn recover_partial_secret(
     (s1h, s2h)
 }
 
-/// Decompose PolyVecK into (w₀, w₁) using Power2Round-style decompose.
+/// Decompose a PolyVecK into (w₀, w₁) using the FIPS 204 reference decompose.
+///
+/// CRITICAL: This MUST produce bit-identical results to the coordinator’s
+/// `dilithium::rounding::decompose()`, otherwise the challenge hash c̃ will
+/// differ between round3 and combine, causing 100% delta rejection.
 fn decompose_veck(w: &PolyVecK) -> (PolyVecK, PolyVecK) {
+    use dilithium::{
+        polyvec::PolyVecK as DPolyVecK,
+        polyvec::polyveck_decompose,
+        ML_DSA_44,
+    };
+    let mode = ML_DSA_44;
+
+    let mut w_ref = DPolyVecK::default();
+    for i in 0..K {
+        w_ref.vec[i].coeffs = w.polys[i].coeffs;
+    }
+
+    let mut w1_ref = DPolyVecK::default();
+    let mut w0_ref = DPolyVecK::default();
+    polyveck_decompose(mode, &mut w1_ref, &mut w0_ref, &w_ref);
+
     let mut w0 = PolyVecK::zero();
     let mut w1 = PolyVecK::zero();
     for i in 0..K {
-        for j in 0..N {
-            let a = w.polys[i].coeffs[j];
-            // Ensure a is in [0, Q)
-            let a_pos = if a < 0 { a + Q } else { a };
-            // Decompose: a = a₁·α + a₀ where α = 2γ₂
-            let alpha = 2 * GAMMA2;
-            let a0 = a_pos - ((a_pos + alpha / 2 - 1) / alpha) * alpha;
-            let a1 = if a0 > 0 {
-                (a_pos - a0) / alpha
-            } else {
-                (a_pos - a0 - 1) / alpha + 1
-            };
-            w0.polys[i].coeffs[j] = a0;
-            w1.polys[i].coeffs[j] = a1;
-        }
+        w0.polys[i].coeffs = w0_ref.vec[i].coeffs;
+        w1.polys[i].coeffs = w1_ref.vec[i].coeffs;
     }
     (w0, w1)
 }
 
 /// Compute challenge hash c̃ = H(μ ‖ w₁_packed).
 fn compute_challenge(mu: &[u8; 64], w1: &PolyVecK) -> [u8; CTILDEBYTES] {
+    use dilithium::{
+        polyvec::PolyVecK as DPolyVecK,
+        polyvec::polyveck_pack_w1,
+        ML_DSA_44,
+    };
+    let mode = ML_DSA_44;
+
+    let mut w1_ref = DPolyVecK::default();
+    for i in 0..K {
+        w1_ref.vec[i].coeffs = w1.polys[i].coeffs;
+    }
+    let mut w1_packed = alloc::vec![0u8; mode.k() * mode.polyw1_packedbytes()];
+    polyveck_pack_w1(mode, &mut w1_packed, &w1_ref);
+
     let mut h = Shake256::default();
     h.update(mu);
-    // Pack w₁ (6 bits per coeff for ML-DSA-44)
-    for poly in &w1.polys {
-        let mut packed = [0u8; POLYW1_PACKEDBYTES];
-        for k in 0..N / 4 {
-            packed[3 * k] = (poly.coeffs[4 * k] as u8) |
-                ((poly.coeffs[4 * k + 1] as u8) << 6);
-            packed[3 * k + 1] = ((poly.coeffs[4 * k + 1] >> 2) as u8) |
-                ((poly.coeffs[4 * k + 2] as u8) << 4);
-            packed[3 * k + 2] = ((poly.coeffs[4 * k + 2] >> 4) as u8) |
-                ((poly.coeffs[4 * k + 3] as u8) << 2);
-        }
-        h.update(&packed);
-    }
+    h.update(&w1_packed);
     let mut c = [0u8; CTILDEBYTES];
     h.finalize_xof().read(&mut c);
     c
