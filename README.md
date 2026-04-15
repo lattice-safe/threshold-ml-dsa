@@ -173,7 +173,7 @@ cargo test --test v03_tests
 | Poly arithmetic | 6 | Add, sub, center, norms, power2round |
 | Params | 4 | Lookup, binomial, num_subsets, rejection |
 | Doctest | 1 | Usage example compilation |
-| **Total** | **107** | **All passing — 0 clippy warnings (all + pedantic), clean `no_std`** |
+| **Total** | **107** | **All passing, clean `no_std`; pedantic clippy currently reports non-security style warnings (mostly tests/docs)** |
 
 ## Security Notes
 

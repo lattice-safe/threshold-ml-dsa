@@ -3,7 +3,7 @@
 > **Based on:** FIPS 204 (ML-DSA) + ePrint 2026/013 (Mithril Scheme)
 >
 > This document describes the cryptographic protocol implemented in
-> `threshold-ml-dsa` v0.3.0, covering fresh key generation via Replicated
+> `threshold-ml-dsa` v0.3.x (current crate release: v0.3.3), covering fresh key generation via Replicated
 > Secret Sharing, the 3-round threshold signing protocol with K-parallel
 > hyperball commitments, and FIPS 204-compatible verification.
 
@@ -453,15 +453,15 @@ independent hyperball samples. The coordinator tries each of the K slots,
 accepting the first one that produces a valid FIPS 204 signature. This
 dramatically improves per-round success probability.
 
-### Numerical Values (ML-DSA-44, from Figure 8)
+### Numerical Values (ML-DSA-44, exact implementation values from Figure 8)
 
-| (T, N) | K | Radius r | Per-slot acceptance |
-|--------|---|----------|---------------------|
-| (2, 2) | 2 | 252,778 | ~50% |
-| (3, 3) | 5 | 252,131 | ~20% |
-| (4, 4) | 14 | 251,338 | ~7% |
-| (5, 5) | 42 | 250,590 | ~2.4% |
-| (6, 6) | 100 | 250,590 | ~1% |
+| (T, N) | K | Radius r | Radius r1 |
+|--------|---|----------|-----------|
+| (2, 2) | 2 | 252,778 | 252,833 |
+| (3, 3) | 4 | 246,490 | 246,546 |
+| (4, 4) | 8 | 243,463 | 243,519 |
+| (5, 5) | 16 | 239,924 | 239,981 |
+| (6, 6) | 37 | 219,245 | 219,301 |
 
 ---
 

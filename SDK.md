@@ -51,6 +51,37 @@ Figure 4 keygen: each RSS subset gets an independently sampled secret.
 
 **Returns:** `Result<Self, Error>`
 
+### `sdk.pk()`
+
+Returns a read-only reference to the packed public key.
+
+**Returns:** `&[u8; PK_BYTES]`
+
+### `sdk.num_parties()`
+
+Returns the number of parties (`N`) in this SDK instance.
+
+**Returns:** `usize`
+
+### `sdk.params()`
+
+Returns a read-only reference to the threshold parameter set.
+
+**Returns:** `&ThresholdParams`
+
+### `sdk.party_key(index)`
+
+Returns a read-only handle to a party key for low-level protocol integration tests
+and advanced distributed orchestration.
+
+**Returns:** `Option<&ThresholdPrivateKey>`
+
+> [!CAUTION]
+> `party_key()` is for advanced use-cases. Production integrations should prefer
+> `threshold_sign()` and avoid exporting private key handles across trust boundaries.
+> When using low-level rounds, callers must enforce per-peer Round-2 reveal checks
+> and authenticated/replay-protected transport.
+
 ### `sdk.threshold_sign(active, msg, rng)`
 
 Perform a full 3-round threshold signing protocol with K parallel repetitions.
@@ -105,6 +136,7 @@ from ePrint 2026/013, Figure 8.
 
 - **No key decomposition**: Keys are generated fresh, not split from an existing ML-DSA key.
 - **Fail-closed**: `Ok(sig)` is always verified before return; unsuccessful attempts return an error instead of an invalid signature.
+- **Read-only SDK surface**: internal key material/parameter fields are not publicly mutable; use accessor methods for inspection.
 - **In-process orchestrator**: The SDK runs all parties in-process. For distributed
   deployment, use the low-level `sign` + `coordinator` modules and add authenticated
   transport between isolated party processes.
