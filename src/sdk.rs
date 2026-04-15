@@ -22,18 +22,51 @@ use zeroize::Zeroize;
 ///
 /// This provides a one-call interface for threshold key generation
 /// and signing, following ePrint 2026/013 exactly.
+///
+/// Fields are `pub(crate)` to prevent external mutation of secret
+/// key material and parameter invariants. Use accessor methods
+/// for read-only inspection.
 pub struct ThresholdMlDsa44Sdk {
     /// Packed public key (ρ ‖ t₁)
-    pub pk: [u8; PK_BYTES],
+    pub(crate) pk: [u8; PK_BYTES],
     /// Per-party private keys
-    pub sks: Vec<rss::ThresholdPrivateKey>,
+    pub(crate) sks: Vec<rss::ThresholdPrivateKey>,
     /// Threshold parameters (T, N, K, r, r₁, ν)
-    pub params: ThresholdParams,
+    pub(crate) params: ThresholdParams,
     /// Maximum full-protocol retries
-    pub max_retries: usize,
+    pub(crate) max_retries: usize,
 }
 
 impl ThresholdMlDsa44Sdk {
+    /// Returns a reference to the packed public key.
+    #[must_use]
+    pub fn pk(&self) -> &[u8; PK_BYTES] {
+        &self.pk
+    }
+
+    /// Returns the number of parties (N).
+    #[must_use]
+    pub fn num_parties(&self) -> usize {
+        self.sks.len()
+    }
+
+    /// Returns a reference to the threshold parameters.
+    #[must_use]
+    pub fn params(&self) -> &ThresholdParams {
+        &self.params
+    }
+
+    /// Returns a reference to a party's private key by index.
+    ///
+    /// Intended for protocol-level integration tests that exercise
+    /// the low-level 3-round API. Production callers should use
+    /// `threshold_sign()` instead.
+    #[must_use]
+    pub fn party_key(&self, index: usize) -> Option<&rss::ThresholdPrivateKey> {
+        self.sks.get(index)
+    }
+
+
     /// Create a threshold SDK from a 32-byte seed.
     ///
     /// Generates fresh threshold keys using the paper's keygen (Figure 4).

@@ -37,14 +37,16 @@ use zeroize::Zeroize;
 
 /// A single subset's secret key: `(s₁_I, s₂_I)` where I ⊂ [N], |I| = N-T+1.
 /// Both vectors have coefficients drawn from `χ_s = U([-η, η])`.
+///
+/// Fields are `pub(crate)` to prevent accidental exfiltration.
 #[derive(Clone)]
 pub struct Share {
-    pub s1: PolyVecL,
-    pub s2: PolyVecK,
+    pub(crate) s1: PolyVecL,
+    pub(crate) s2: PolyVecK,
     /// NTT-domain cache of s₁
-    pub s1h: PolyVecL,
+    pub(crate) s1h: PolyVecL,
     /// NTT-domain cache of s₂
-    pub s2h: PolyVecK,
+    pub(crate) s2h: PolyVecK,
 }
 
 impl Share {
@@ -79,19 +81,41 @@ impl Drop for Share {
 /// Contains this party's ID, the shared public data (ρ, tr),
 /// per-party randomness `key`, and a map from subset bitmask
 /// to the corresponding `Share`.
+///
+/// Fields are `pub(crate)` to prevent accidental exfiltration
+/// via logging, serialization, or debug plumbing.
 #[derive(Clone)]
 pub struct ThresholdPrivateKey {
     /// This party's ID ∈ [0, N)
-    pub id: u8,
+    pub(crate) id: u8,
     /// ρ: the public seed for A = ExpandA(ρ)
-    pub rho: [u8; 32],
+    pub(crate) rho: [u8; 32],
     /// Per-party random key for hedged nonce derivation
-    pub key: [u8; 32],
+    pub(crate) key: [u8; 32],
     /// tr = CRH(pk) — hash of the public key
-    pub tr: [u8; TRBYTES],
+    pub(crate) tr: [u8; TRBYTES],
     /// Map from subset bitmask → Share
     /// (party holds all shares for subsets it belongs to)
-    pub shares: BTreeMap<u8, Share>,
+    pub(crate) shares: BTreeMap<u8, Share>,
+}
+
+impl ThresholdPrivateKey {
+    /// Returns this party's ID.
+    #[must_use]
+    pub fn id(&self) -> u8 {
+        self.id
+    }
+
+    /// Returns the public key hash tr = CRH(pk).
+    #[must_use]
+    pub fn tr(&self) -> &[u8; TRBYTES] {
+        &self.tr
+    }
+
+    /// Returns an iterator over subset bitmasks this party holds.
+    pub fn share_masks(&self) -> impl Iterator<Item = &u8> {
+        self.shares.keys()
+    }
 }
 
 impl Zeroize for ThresholdPrivateKey {

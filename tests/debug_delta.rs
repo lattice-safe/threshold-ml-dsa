@@ -15,7 +15,7 @@ fn trace_one_attempt() {
     let mut rng = StdRng::seed_from_u64(12345);
     let msg = b"Hello, threshold ML-DSA!";
     let active = [0u8, 1];
-    let k_reps = sdk.params.k_reps as usize;
+    let k_reps = sdk.params().k_reps as usize;
 
     let mut act: u8 = 0;
     for &id in &active {
@@ -27,9 +27,9 @@ fn trace_one_attempt() {
     let mut rd1_hashes = Vec::new();
     let mut rd1_states = Vec::new();
     for &party_id in &active {
-        let sk = &sdk.sks[party_id as usize];
+        let sk = sdk.party_key(party_id as usize).unwrap();
         let (hash, st1) =
-            threshold_ml_dsa::sign::round1(sk, &sdk.params, act, msg, &session_id, &mut rng)
+            threshold_ml_dsa::sign::round1(sk, sdk.params(), act, msg, &session_id, &mut rng)
                 .unwrap();
         rd1_hashes.push(hash);
         rd1_states.push(st1);
@@ -39,7 +39,7 @@ fn trace_one_attempt() {
     let mut rd2_reveals = Vec::new();
     let mut rd2_states = Vec::new();
     for (idx, &party_id) in active.iter().enumerate() {
-        let sk = &sdk.sks[party_id as usize];
+        let sk = sdk.party_key(party_id as usize).unwrap();
         let (reveal, st2) = threshold_ml_dsa::sign::round2(
             sk,
             act,
@@ -48,7 +48,7 @@ fn trace_one_attempt() {
             &rd1_hashes,
             &rd1_hashes[idx],
             &rd1_states[idx],
-            &sdk.params,
+            sdk.params(),
         )
         .unwrap();
         rd2_reveals.push(reveal);
@@ -78,13 +78,13 @@ fn trace_one_attempt() {
         .into_iter()
         .zip(active.iter().zip(rd2_states.iter()))
     {
-        let sk = &sdk.sks[party_id as usize];
+        let sk = sdk.party_key(party_id as usize).unwrap();
         let zs = threshold_ml_dsa::sign::round3(
             sk,
             &wfinals,
             st1,
             st2,
-            &sdk.params,
+            sdk.params(),
         )
         .unwrap();
         all_responses.push(zs);
@@ -132,7 +132,7 @@ fn trace_one_attempt() {
         let mode = ML_DSA_44;
         let mut rho = [0u8; 32];
         let mut t1 = DPolyVecK::default();
-        unpack_pk(mode, &mut rho, &mut t1, &sdk.pk);
+        unpack_pk(mode, &mut rho, &mut t1, sdk.pk());
 
         let mut mat: [DPolyVecL; K] = core::array::from_fn(|_| DPolyVecL::default());
         matrix_expand(mode, &mut mat, &rho);
@@ -162,7 +162,7 @@ fn trace_one_attempt() {
         use threshold_ml_dsa::poly::decompose;
 
         let mut h_tr = Shake256::default();
-        h_tr.update(&sdk.pk);
+        h_tr.update(sdk.pk());
         let mut tr = [0u8; TRBYTES];
         h_tr.finalize_xof().read(&mut tr);
         let mu = threshold_ml_dsa::sign::compute_mu(&tr, msg);

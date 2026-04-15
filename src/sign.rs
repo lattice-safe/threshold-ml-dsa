@@ -272,7 +272,7 @@ pub fn verify_round2_reveal(
 ///
 /// This function does **not** verify that `wfinals` is consistent with
 /// the per-party commitment hashes stored in `st_rd2.hashes`, because
-/// `wfinals` is an *aggregate* (Σ w_i) — it cannot be compared against
+/// `wfinals` is an *aggregate* (`Σ w_i`) — it cannot be compared against
 /// individual per-party hashes without re-deriving the aggregation.
 ///
 /// Distributed integrators MUST call [`verify_round2_reveal`] for every
@@ -293,6 +293,11 @@ pub fn round3(
 
     let k_reps = params.k_reps as usize;
     let mode = ML_DSA_44;
+
+    // Reject short coordinator input instead of silently truncating.
+    if wfinals.len() < k_reps {
+        return Err(Error::InvalidParameters);
+    }
 
     // Recover this party's partial secret for the active signer set
     let active = bitmask_to_sorted_ids(st_rd2.act, params.n);

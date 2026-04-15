@@ -41,11 +41,11 @@ fn test_keygen_all_configs_produce_valid_keys() {
 
         // Each party holds correct subsets
         for sk in &sks {
-            for (&mask, _) in &sk.shares {
+            for &mask in sk.share_masks() {
                 assert!(
-                    mask & (1 << sk.id) != 0,
+                    mask & (1 << sk.id()) != 0,
                     "Party {} has share for subset it doesn't belong to",
-                    sk.id
+                    sk.id()
                 );
             }
         }
@@ -54,9 +54,9 @@ fn test_keygen_all_configs_produce_valid_keys() {
         assert_eq!(pk.len(), PK_BYTES);
 
         // All parties share the same tr
-        let tr0 = sks[0].tr;
+        let tr0 = sks[0].tr();
         for sk in &sks {
-            assert_eq!(sk.tr, tr0, "All parties must share the same tr");
+            assert_eq!(sk.tr(), tr0, "All parties must share the same tr");
         }
     }
 }
@@ -138,10 +138,10 @@ fn test_sdk_creation_and_verify_roundtrip() {
     // Public key should verify with the standard ML-DSA-44 verifier
     // (We can't sign yet — protocol is not fully wired — but we can
     // verify that the SDK creates valid key material)
-    assert_eq!(sdk.sks.len(), 3);
-    assert_eq!(sdk.params.t, 2);
-    assert_eq!(sdk.params.n, 3);
-    assert_eq!(sdk.params.k_reps, 3); // From Figure 8: (2,3) → K=3
+    assert_eq!(sdk.num_parties(), 3);
+    assert_eq!(sdk.params().t, 2);
+    assert_eq!(sdk.params().n, 3);
+    assert_eq!(sdk.params().k_reps, 3); // From Figure 8: (2,3) → K=3
 }
 
 #[test]
