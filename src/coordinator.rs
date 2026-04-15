@@ -5,16 +5,16 @@
 //! one produces a valid FIPS 204 signature.
 //!
 //! The coordinator:
-//! 1. Aggregates commitments w_final = Σ w_i
-//! 2. Aggregates responses z_final = Σ z_i
-//! 3. For each k ∈ [0, K): checks if z_k produces a valid signature
+//! 1. Aggregates commitments `w_final` = Σ `w_i`
+//! 2. Aggregates responses `z_final` = Σ `z_i`
+//! 3. For each k ∈ [0, K): checks if `z_k` produces a valid signature
 
 extern crate alloc;
 use alloc::vec::Vec;
 
 use crate::error::Error;
-use crate::params::*;
-use crate::poly::*;
+use crate::params::{SIG_BYTES, CTILDEBYTES, L, POLYZ_PACKEDBYTES, PK_BYTES, ThresholdParams, TRBYTES, K, GAMMA1, BETA, N, Q, GAMMA2, OMEGA, POLYW1_PACKEDBYTES};
+use crate::poly::{PolyVecL, PolyVecK};
 use crate::sign;
 use crate::verify;
 use sha3::digest::{ExtendableOutput, Update, XofReader};
@@ -28,7 +28,7 @@ use sha3::Shake256;
 pub struct Signature {
     /// The challenge hash c̃ (CTILDEBYTES bytes).
     pub c_tilde: Vec<u8>,
-    /// The aggregated response vector z ∈ ℤ_q^L.
+    /// The aggregated response vector z ∈ `ℤ_q^L`.
     pub z: PolyVecL,
     /// The hint vector h (packed as OMEGA + K bytes).
     pub h: Vec<u8>,
@@ -36,6 +36,7 @@ pub struct Signature {
 
 impl Signature {
     /// Encode the signature into the standard FIPS 204 byte format.
+    #[must_use] 
     pub fn to_bytes(&self) -> Vec<u8> {
         let mut sig = alloc::vec![0u8; SIG_BYTES];
         sig[..CTILDEBYTES].copy_from_slice(&self.c_tilde);
@@ -51,7 +52,8 @@ impl Signature {
 
 /// Aggregate K commitment vectors from T parties.
 ///
-/// For each k ∈ [0, K): wfinal[k] = Σ_i w_{i,k}
+/// For each k ∈ [0, K): wfinal[k] = `Σ_i` w_{i,k}
+#[must_use] 
 pub fn aggregate_commitments(
     all_reveals: &[Vec<PolyVecK>], // [T parties][K slots]
     k_reps: usize,
@@ -70,7 +72,8 @@ pub fn aggregate_commitments(
 
 /// Aggregate K response vectors from T parties.
 ///
-/// For each k ∈ [0, K): zfinal[k] = Σ_i z_{i,k}
+/// For each k ∈ [0, K): zfinal[k] = `Σ_i` z_{i,k}
+#[must_use] 
 pub fn aggregate_responses(
     all_responses: &[Vec<PolyVecL>], // [T parties][K slots]
     k_reps: usize,
@@ -91,9 +94,9 @@ pub fn aggregate_responses(
 ///
 /// This matches the Go `Combine()` function.
 /// For each slot k:
-/// 1. Check ‖z_k‖∞ < γ₁ - β
-/// 2. Compute Az_k - 2^d·c·t₁ = "approximated w"  
-/// 3. Check ‖δ‖∞ = ‖approx_w - w_final‖∞ < γ₂
+/// 1. Check ‖`z_k`‖∞ < γ₁ - β
+/// 2. Compute `Az_k` - 2^d·c·t₁ = "approximated w"  
+/// 3. Check ‖δ‖∞ = ‖`approx_w` - `w_final`‖∞ < γ₂
 /// 4. Compute hints
 /// 5. If ω hints ≤ OMEGA, pack and return
 pub fn combine(
@@ -267,7 +270,7 @@ pub fn combine(
     Err(Error::InsufficientResponses)
 }
 
-/// Decompose a PolyVecK into (w₀, w₁) using ML-DSA-44 decompose.
+/// Decompose a `PolyVecK` into (w₀, w₁) using ML-DSA-44 decompose.
 fn decompose_polyveck(w: &PolyVecK) -> (PolyVecK, PolyVecK) {
     use dilithium::{rounding, ML_DSA_44};
     let mode = ML_DSA_44;
@@ -285,7 +288,7 @@ fn decompose_polyveck(w: &PolyVecK) -> (PolyVecK, PolyVecK) {
     (w0, w1)
 }
 
-/// Compute c̃ = H(μ ‖ w₁_packed).
+/// Compute c̃ = H(μ ‖ `w₁_packed`).
 fn compute_c_tilde(mu: &[u8; 64], w1: &PolyVecK) -> [u8; CTILDEBYTES] {
     use dilithium::{poly::Poly as DPoly, ML_DSA_44};
     let mode = ML_DSA_44;

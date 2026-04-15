@@ -29,7 +29,7 @@ use alloc::{collections::BTreeMap, vec::Vec};
 use std::collections::BTreeMap;
 
 use crate::error::Error;
-use crate::params::*;
+use crate::params::{TRBYTES, ThresholdParams, PK_BYTES, MAX_PARTIES, L, K, N, ETA};
 use crate::poly::{Poly, PolyVecK, PolyVecL};
 use sha3::digest::{ExtendableOutput, Update, XofReader};
 use sha3::Shake256;
@@ -98,7 +98,7 @@ impl Zeroize for ThresholdPrivateKey {
     fn zeroize(&mut self) {
         self.key.zeroize();
         self.tr.zeroize();
-        for (_, share) in self.shares.iter_mut() {
+        for share in self.shares.values_mut() {
             share.zeroize();
         }
     }
@@ -132,10 +132,10 @@ impl core::fmt::Debug for ThresholdPrivateKey {
 /// 1. Derive ρ from seed via SHAKE-256
 /// 2. Compute A = ExpandA(ρ)
 /// 3. For each (N-T+1)-subset I (enumerated via Gosper's hack):
-///    a. Derive s_I = (s1_I, s2_I) ← χ_s independently
-///    b. Distribute s_I to all parties in I
-/// 4. Compute composite s = Σ s_I
-/// 5. Compute t = As₁ + s₂, Power2Round → (t₀, t₁)
+///    a. Derive `s_I` = (`s1_I`, `s2_I`) ← `χ_s` independently
+///    b. Distribute `s_I` to all parties in I
+/// 4. Compute composite s = Σ `s_I`
+/// 5. Compute t = As₁ + s₂, `Power2Round` → (t₀, t₁)
 /// 6. Public key = (ρ, t₁), tr = CRH(pk)
 ///
 /// # Returns
@@ -258,7 +258,7 @@ pub fn keygen_from_seed(
     tr_reader.read(&mut tr);
 
     // Set tr in all private keys
-    for sk in sks.iter_mut() {
+    for sk in &mut sks {
         sk.tr = tr;
     }
 
@@ -287,8 +287,8 @@ fn sample_leq_eta(p: &mut Poly, seed: &[u8; 64], nonce: u16) {
             if i >= N {
                 break;
             }
-            let t1 = (*byte & 0x0F) as u32;
-            let t2 = (*byte >> 4) as u32;
+            let t1 = u32::from(*byte & 0x0F);
+            let t2 = u32::from(*byte >> 4);
 
             // η=2: accept if < 15, reduce mod 5
             if ETA == 2 {
@@ -309,7 +309,7 @@ fn sample_leq_eta(p: &mut Poly, seed: &[u8; 64], nonce: u16) {
 
 /// Compute the public key bytes: `pk = (ρ ‖ t₁_packed)`.
 ///
-/// Internally: t = A·NTT⁻¹(s₁_hat) + s₂, Power2Round(t) → (t₀, t₁)
+/// Internally: t = `A·NTT⁻¹(s₁_hat)` + s₂, Power2Round(t) → (t₀, t₁)
 fn compute_public_key(rho: &[u8; 32], s1h_total: &PolyVecL, s2_total: &PolyVecK) -> [u8; PK_BYTES] {
     use dilithium::{
         packing::pack_pk,
@@ -375,6 +375,7 @@ fn compute_public_key(rho: &[u8; 32], s1h_total: &PolyVecL, s2_total: &PolyVecK)
 /// Legacy subset enumeration (preserved for backward compatibility).
 ///
 /// Returns a list of subsets, where each subset is a sorted Vec of party indices.
+#[must_use] 
 pub fn enumerate_subsets(n: usize, t: usize) -> Vec<Vec<usize>> {
     if n == 0 || t == 0 || t > n || n < 2 {
         return Vec::new();
@@ -408,6 +409,7 @@ fn enumerate_subsets_helper(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::params::{get_threshold_params, num_subsets};
 
     #[test]
     fn test_keygen_produces_valid_keys() {

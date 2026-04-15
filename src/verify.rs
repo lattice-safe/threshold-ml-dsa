@@ -20,22 +20,25 @@ use alloc::{vec, vec::Vec};
 /// the ML-DSA-44 parameter set.
 ///
 /// # Arguments
-/// * `sig` — the encoded signature (SIG_BYTES bytes)
+/// * `sig` — the encoded signature (`SIG_BYTES` bytes)
 /// * `msg` — the signed message
-/// * `pk` — the encoded public key (PK_BYTES bytes)
+/// * `pk` — the encoded public key (`PK_BYTES` bytes)
 ///
 /// # Returns
 /// `true` if the signature is valid, `false` otherwise.
+#[must_use] 
 pub fn verify(sig: &[u8], msg: &[u8], pk: &[u8]) -> bool {
     dilithium::sign::verify(dilithium::params::ML_DSA_44, sig, msg, &[], pk)
 }
 
 /// Verify an ML-DSA-65 signature.
+#[must_use] 
 pub fn verify_65(sig: &[u8], msg: &[u8], pk: &[u8]) -> bool {
     dilithium::sign::verify(dilithium::params::ML_DSA_65, sig, msg, &[], pk)
 }
 
 /// Verify an ML-DSA-87 signature.
+#[must_use] 
 pub fn verify_87(sig: &[u8], msg: &[u8], pk: &[u8]) -> bool {
     dilithium::sign::verify(dilithium::params::ML_DSA_87, sig, msg, &[], pk)
 }
@@ -43,6 +46,7 @@ pub fn verify_87(sig: &[u8], msg: &[u8], pk: &[u8]) -> bool {
 /// Generate an ML-DSA-44 key pair (for testing / key generation).
 ///
 /// Returns (pk, sk) as raw byte vectors.
+#[must_use] 
 pub fn keygen(seed: &[u8; 32]) -> (Vec<u8>, Vec<u8>) {
     dilithium::sign::keypair(dilithium::params::ML_DSA_44, seed)
 }
@@ -50,6 +54,7 @@ pub fn keygen(seed: &[u8; 32]) -> (Vec<u8>, Vec<u8>) {
 /// Sign a message using standard (non-threshold) ML-DSA-44.
 ///
 /// This is used for reference comparison in tests.
+#[must_use] 
 pub fn sign_standard(msg: &[u8], sk: &[u8], rng_seed: &[u8; 32]) -> Vec<u8> {
     let mode = dilithium::params::ML_DSA_44;
     let mut sig = vec![0u8; mode.signature_bytes()];

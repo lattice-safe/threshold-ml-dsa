@@ -3,11 +3,11 @@
 
 // ─── FIPS 204 ML-DSA-44 Parameters ───────────────────────────────────────
 
-/// The prime modulus q for ℤ_q.
+/// The prime modulus q for `ℤ_q`.
 /// q = 2²³ − 2¹³ + 1 = 8380417.
 pub const Q: i32 = 8380417;
 
-/// Polynomial degree: coefficients in ℤ_q\[X\]/(X^N + 1).
+/// Polynomial degree: coefficients in `ℤ_q`\[X\]/(X^N + 1).
 pub const N: usize = 256;
 
 /// Dropped bits from public key (power-of-2 rounding parameter).
@@ -86,14 +86,14 @@ pub const SIG_BYTES: usize = CTILDEBYTES + L * POLYZ_PACKEDBYTES + OMEGA + K;
 /// The paper targets N ≤ 6 to keep the number of RSS subsets manageable.
 pub const MAX_PARTIES: usize = 6;
 
-/// Dimension of the FVec float vector: (K+L)×N coefficients.
+/// Dimension of the `FVec` float vector: (K+L)×N coefficients.
 pub const FVEC_DIM: usize = (K + L) * N;
 
 /// Threshold-specific parameters for a given (T, N) pair.
 /// From ePrint 2026/013, Figure 8 (ML-DSA-44).
 ///
-/// - `r`: target hyperball radius for χ_z
-/// - `r1`: randomness hyperball radius for χ_r  
+/// - `r`: target hyperball radius for `χ_z`
+/// - `r1`: randomness hyperball radius for `χ_r`  
 /// - `k_reps`: number of parallel repetitions K
 /// - `nu`: expansion factor for first ℓ coordinates (ν=3 for ML-DSA-44)
 #[derive(Debug, Clone, Copy)]
@@ -102,9 +102,9 @@ pub struct ThresholdParams {
     pub t: u8,
     /// Total parties N
     pub n: u8,
-    /// Target ball radius r (for χ_z)
+    /// Target ball radius r (for `χ_z`)
     pub r: f64,
-    /// Randomness ball radius r₁ (for χ_r), r₁ ≥ r
+    /// Randomness ball radius r₁ (for `χ_r`), r₁ ≥ r
     pub r1: f64,
     /// Number of parallel protocol repetitions K
     pub k_reps: u16,
@@ -119,6 +119,7 @@ pub struct ThresholdParams {
 ///
 /// Parameters from ePrint 2026/013, Figure 8 (ML-DSA-44).
 /// All sets use the same multiplicative factor ν = 3.
+#[must_use] 
 pub fn get_threshold_params(t: u8, n: u8) -> Option<ThresholdParams> {
     if t < 2 || t > n || n > 6 {
         return None;
@@ -156,6 +157,7 @@ pub fn get_threshold_params(t: u8, n: u8) -> Option<ThresholdParams> {
 }
 
 /// Compute C(n, k) = n! / (k! (n-k)!)
+#[must_use] 
 pub const fn binomial(n: u8, k: u8) -> usize {
     if k > n {
         return 0;
@@ -175,6 +177,7 @@ pub const fn binomial(n: u8, k: u8) -> usize {
 }
 
 /// Number of RSS subsets for a given (N, T): C(N, N-T+1)
+#[must_use] 
 pub const fn num_subsets(n: u8, t: u8) -> usize {
     binomial(n, n - t + 1)
 }

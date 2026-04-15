@@ -8,7 +8,7 @@ use core::fmt;
 /// Errors that can occur during threshold ML-DSA operations.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Error {
-    /// A party's partial response z_i exceeded the hyperball L₂ bound.
+    /// A party's partial response `z_i` exceeded the hyperball L₂ bound.
     /// This is the expected "soft failure" in the Mithril protocol —
     /// the coordinator simply retries the round.
     LocalRejectionAbort,
@@ -22,7 +22,7 @@ pub enum Error {
     /// The aggregated or individual signature failed FIPS 204 verification.
     InvalidSignature,
 
-    /// The (N, T) threshold configuration is invalid (e.g., T > N or N > MAX_PARTIES).
+    /// The (N, T) threshold configuration is invalid (e.g., T > N or N > `MAX_PARTIES`).
     InvalidParameters,
 
     /// The low-bits hint check failed (‖w − cs₂‖∞ ≥ γ₂ − β).

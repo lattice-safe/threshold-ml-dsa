@@ -3,14 +3,14 @@
 //! Implements the 3-round signing flow from ePrint 2026/013:
 //!
 //! **Round 1 (Commit):** Each party i generates K commitments
-//!   w_{i,k} = A·r_k + e_k using hyperball sampling, and broadcasts
+//!   w_{i,k} = `A·r_k` + `e_k` using hyperball sampling, and broadcasts
 //!   H(tr ‖ id ‖ w_{i,k}).
 //!
 //! **Round 2 (Reveal):** Each party reveals the full w_{i,k} vectors.
 //!   Other parties verify the commitment hash.
 //!
 //! **Round 3 (Respond):** Each party computes K partial responses
-//!   z_{i,k} = (c·s₁_I + y_k, c·s₂_I + e_k) and applies the
+//!   z_{i,k} = (`c·s₁_I` + `y_k`, `c·s₂_I` + `e_k`) and applies the
 //!   hyperball rejection test ‖z_{i,k}‖₂ ≤ r.
 //!   Responses that pass are nonzero; those that fail are zero vectors.
 //!
@@ -21,7 +21,7 @@ use alloc::vec::Vec;
 
 use crate::error::Error;
 use crate::fvec::{sample_hyperball, FVec};
-use crate::params::*;
+use crate::params::{TRBYTES, ThresholdParams, K, L, N, Q, CTILDEBYTES};
 use crate::partition;
 use crate::poly::{Poly, PolyVecK, PolyVecL};
 use crate::rss::ThresholdPrivateKey;
@@ -32,17 +32,33 @@ use subtle::ConstantTimeEq;
 use zeroize::Zeroize;
 
 /// Round 1 state saved by a party for use in Round 3.
+///
+/// Contains sensitive ephemeral randomness; zeroized on drop.
 pub struct StRound1 {
     /// K packed commitment vectors (each is K polynomials in normal domain)
     pub w_packed: Vec<Vec<u8>>,
-    /// K randomness samples as floating vectors from SampleHyperball.
+    /// K randomness samples as floating vectors from `SampleHyperball`.
     ///
     /// Round 1 commitments use rounded copies of these vectors.
     /// Round 3 adds them in floating-point before the final rounding step.
     pub rand_fvecs: Vec<FVec>,
 }
 
+impl Drop for StRound1 {
+    fn drop(&mut self) {
+        // w_packed contains commitment data — not secret, but wipe defensively.
+        for v in &mut self.w_packed {
+            v.zeroize();
+        }
+        // rand_fvecs are zeroized by FVec's own Drop impl when the Vec drops.
+    }
+}
+
 /// Round 2 state saved by a party for use in Round 3.
+///
+/// Contains commitment hashes and message hash; zeroized on drop.
+#[derive(Zeroize)]
+#[zeroize(drop)]
 pub struct StRound2 {
     /// Commitment hashes received from all parties in Round 1
     pub hashes: Vec<[u8; 32]>,
@@ -53,6 +69,7 @@ pub struct StRound2 {
 }
 
 /// Compute μ = CRH(tr ‖ msg).
+#[must_use] 
 pub fn compute_mu(tr: &[u8; TRBYTES], msg: &[u8]) -> [u8; 64] {
     let mut h = Shake256::default();
     h.update(tr);
@@ -68,7 +85,7 @@ pub fn compute_mu(tr: &[u8; TRBYTES], msg: &[u8]) -> [u8; 64] {
 /// Round 1: generate K hyperball commitments.
 ///
 /// Returns:
-/// - `commitment_hash`: 32-byte hash H(tag ‖ tr ‖ id ‖ act ‖ session ‖ μ ‖ w_packed)
+/// - `commitment_hash`: 32-byte hash H(tag ‖ tr ‖ id ‖ act ‖ session ‖ μ ‖ `w_packed`)
 /// - `StRound1`: saved state for Round 3
 ///
 /// This matches the Go `Round1()` function.
@@ -152,7 +169,7 @@ pub fn round1<R: RngCore + CryptoRng>(
         act,
         &mu,
         session_id,
-        w_packed_all.iter().map(|chunk| chunk.as_slice()),
+        w_packed_all.iter().map(alloc::vec::Vec::as_slice),
     );
 
     Ok((
@@ -193,7 +210,7 @@ pub fn round2(
         act,
         &mu,
         session_id,
-        st_rd1.w_packed.iter().map(|chunk| chunk.as_slice()),
+        st_rd1.w_packed.iter().map(alloc::vec::Vec::as_slice),
     );
     if !bool::from(computed.ct_eq(own_rd1_hash)) {
         return Err(Error::InvalidShare);
@@ -209,6 +226,7 @@ pub fn round2(
 }
 
 /// Verify a Round 2 reveal against the sender's Round 1 commitment hash.
+#[must_use] 
 pub fn verify_round2_reveal(
     tr: &[u8; TRBYTES],
     party_id: u8,
@@ -234,9 +252,9 @@ pub fn verify_round2_reveal(
 ///
 /// This matches the Go `ComputeResponses()` function.
 /// For each of the K parallel commitments, computes:
-///   z_k = c·s_I + (r_k, e_k) where (r_k, e_k) is from the hyperball sample
+///   `z_k` = `c·s_I` + (`r_k`, `e_k`) where (`r_k`, `e_k`) is from the hyperball sample
 ///
-/// Then applies the ν-scaled L₂ norm check: ‖z_k‖₂ ≤ r.
+/// Then applies the ν-scaled L₂ norm check: ‖`z_k‖₂` ≤ r.
 /// Responses that fail rejection are all-zero (coordinator will skip them).
 pub fn round3(
     sk: &ThresholdPrivateKey,
@@ -375,13 +393,15 @@ fn expand_a(rho: &[u8; 32]) -> Vec<Vec<Poly>> {
     a
 }
 
-/// Size of a single packed PolyVecK (23 bits per coefficient, K×N coefficients).
+/// Size of a single packed `PolyVecK` (23 bits per coefficient, K×N coefficients).
+#[must_use] 
 pub fn pack_w_single_size() -> usize {
     let poly_q_size = (N * 23).div_ceil(8);
     K * poly_q_size
 }
 
-/// Pack a single PolyVecK as 23 bits per coefficient.
+/// Pack a single `PolyVecK` as 23 bits per coefficient.
+#[must_use] 
 pub fn pack_w_single(w: &PolyVecK) -> Vec<u8> {
     let poly_q_size = (N * 23).div_ceil(8);
     let total = K * poly_q_size;
@@ -398,7 +418,7 @@ pub fn pack_w_single(w: &PolyVecK) -> Vec<u8> {
             // Write 23 bits at bit_pos
             let byte_pos = bit_pos / 8;
             let bit_off = bit_pos % 8;
-            let v = (val as u64) << bit_off;
+            let v = u64::from(val) << bit_off;
             for b in 0..4 {
                 if byte_pos + b < buf.len() {
                     buf[byte_pos + b] |= (v >> (b * 8)) as u8;
@@ -411,18 +431,19 @@ pub fn pack_w_single(w: &PolyVecK) -> Vec<u8> {
     buf
 }
 
-/// Unpack a single PolyVecK from 23-bit packed data.
+/// Unpack a single `PolyVecK` from 23-bit packed data.
+#[must_use] 
 pub fn unpack_w_single(buf: &[u8]) -> PolyVecK {
     let mut w = PolyVecK::zero();
     let mut bit_pos = 0usize;
-    for poly in w.polys.iter_mut() {
-        for coeff in poly.coeffs.iter_mut() {
+    for poly in &mut w.polys {
+        for coeff in &mut poly.coeffs {
             let byte_pos = bit_pos / 8;
             let bit_off = bit_pos % 8;
             let mut v: u64 = 0;
             for b in 0..4 {
                 if byte_pos + b < buf.len() {
-                    v |= (buf[byte_pos + b] as u64) << (b * 8);
+                    v |= u64::from(buf[byte_pos + b]) << (b * 8);
                 }
             }
             *coeff = ((v >> bit_off) & 0x7FFFFF) as i32;
@@ -484,7 +505,7 @@ fn recover_partial_secret(sk: &ThresholdPrivateKey, assigned_masks: &[u8]) -> (P
     (s1h, s2h)
 }
 
-/// Extract only w1 (HighBits) from a PolyVecK, skipping the unused w0 copy.
+/// Extract only w1 (`HighBits`) from a `PolyVecK`, skipping the unused w0 copy.
 ///
 /// CRITICAL: This MUST produce bit-identical results to the coordinator's
 /// `dilithium::rounding::decompose()`, otherwise the challenge hash will
@@ -509,7 +530,7 @@ fn decompose_w1_only(w: &PolyVecK) -> PolyVecK {
     w1
 }
 
-/// Compute challenge hash c̃ = H(μ ‖ w₁_packed).
+/// Compute challenge hash c̃ = H(μ ‖ `w₁_packed`).
 fn compute_challenge(mu: &[u8; 64], w1: &PolyVecK) -> [u8; CTILDEBYTES] {
     use dilithium::{polyvec::polyveck_pack_w1, polyvec::PolyVecK as DPolyVecK, ML_DSA_44};
     let mode = ML_DSA_44;

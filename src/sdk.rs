@@ -9,7 +9,7 @@ use alloc::vec::Vec;
 use std::vec::Vec;
 
 use crate::error::Error;
-use crate::params::*;
+use crate::params::{PK_BYTES, ThresholdParams, get_threshold_params, SIG_BYTES};
 use crate::poly::{PolyVecK, PolyVecL};
 use crate::rss;
 use crate::verify;
@@ -215,6 +215,7 @@ impl ThresholdMlDsa44Sdk {
     }
 
     /// Verify a signature using the standard ML-DSA-44 verifier.
+    #[must_use] 
     pub fn verify(&self, msg: &[u8], sig: &[u8]) -> bool {
         verify::verify(sig, msg, &self.pk)
     }

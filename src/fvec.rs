@@ -1,7 +1,7 @@
 //! Float vector type and hyperball sampling.
 //!
 //! Implements `FVec` and `SampleHyperball` from the reference Go implementation.
-//! The float vector represents an element of R_q^{ℓ+k} in centered floating-point
+//! The float vector represents an element of `R_q^{ℓ+k`} in centered floating-point
 //! form, used for hyperball-based rejection sampling (ePrint 2026/013, §2.7).
 //!
 //! Security note: this module uses floating-point arithmetic (`f64`, `libm`) and
@@ -22,13 +22,28 @@ use sha3::{
 ///
 /// First L×N entries correspond to z^(1) (the transmitted part),
 /// last K×N entries correspond to z^(2) (the recoverable part).
+///
+/// Implements `Drop` to zeroize sensitive randomness from memory.
 #[derive(Clone)]
 pub struct FVec {
     pub coeffs: [f64; FVEC_DIM],
 }
 
+impl Drop for FVec {
+    fn drop(&mut self) {
+        // Overwrite all coefficients with zero.
+        // Use write_volatile to prevent the compiler from eliding the wipe.
+        for c in &mut self.coeffs {
+            // SAFETY: c is a valid mutable reference to an f64
+            unsafe { core::ptr::write_volatile(c, 0.0) };
+        }
+        core::sync::atomic::compiler_fence(core::sync::atomic::Ordering::SeqCst);
+    }
+}
+
 impl FVec {
-    /// Create a zero FVec
+    /// Create a zero `FVec`
+    #[must_use] 
     pub fn zero() -> Self {
         Self {
             coeffs: [0.0; FVEC_DIM],
@@ -42,8 +57,9 @@ impl FVec {
         }
     }
 
-    /// Convert from polynomial vectors (s₁ ∈ R_q^ℓ, s₂ ∈ R_q^k) to FVec.
+    /// Convert from polynomial vectors (s₁ ∈ `R_q^ℓ`, s₂ ∈ `R_q^k`) to `FVec`.
     /// Coefficients are centered mod Q into [-Q/2, Q/2].
+    #[must_use] 
     pub fn from_polyvecs(s1: &PolyVecL, s2: &PolyVecK) -> Self {
         let mut fv = Self::zero();
         for i in 0..(L + K) {
@@ -58,13 +74,13 @@ impl FVec {
                 let t = centered - Q;
                 centered = t + ((t >> 31) & Q);
                 centered -= Q / 2;
-                fv.coeffs[i * N + j] = centered as f64;
+                fv.coeffs[i * N + j] = f64::from(centered);
             }
         }
         fv
     }
 
-    /// Round FVec back to polynomial vectors (s₁, s₂).
+    /// Round `FVec` back to polynomial vectors (s₁, s₂).
     /// Adds +Q to negative coefficients.
     pub fn round_to_polyvecs(&self, s1: &mut PolyVecL, s2: &mut PolyVecK) {
         for i in 0..(L + K) {
@@ -84,12 +100,13 @@ impl FVec {
 
     /// Check if the ν-scaled L₂-norm exceeds radius `r`.
     ///
-    /// Computes: Σ_i (x_i / ν)² for i < L·N, plus Σ_i x_i² for i ≥ L·N.
+    /// Computes: `Σ_i` (`x_i` / ν)² for i < L·N, plus `Σ_i` `x_i²` for i ≥ L·N.
     /// Returns true if the sum exceeds r².
     ///
     /// The final comparison uses IEEE 754 bit-level ordering to avoid
     /// a branch on the secret-dependent result. Both operands are
     /// non-negative, so `to_bits()` preserves the total order.
+    #[must_use] 
     pub fn excess(&self, r: f64, nu: f64) -> bool {
         let mut sq = 0.0f64;
         for i in 0..(L + K) {
@@ -172,11 +189,8 @@ pub fn sample_hyperball(out: &mut FVec, radius: f64, nu: f64, rhop: &[u8; 64], n
         let f2 = (u2 as f64) / ((1u128 << 64) as f64);
 
         // Box-Muller transform
-        let log_val = if f1 < f64::MIN_POSITIVE {
-            f64::MIN_POSITIVE
-        } else {
-            f1
-        };
+        // Clamp f1 to avoid log(0) — use fmax to avoid a data-dependent branch.
+        let log_val = libm::fmax(f1, f64::MIN_POSITIVE);
         let r = libm::sqrt(-2.0 * libm::log(log_val));
         let theta = 2.0 * core::f64::consts::PI * f2;
         let z1 = r * libm::cos(theta);

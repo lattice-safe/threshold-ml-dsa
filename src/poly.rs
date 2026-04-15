@@ -1,4 +1,4 @@
-//! Polynomial arithmetic over ℤ_q\[X\]/(X^256 + 1) for ML-DSA.
+//! Polynomial arithmetic over `ℤ_q`\[X\]/(X^256 + 1) for ML-DSA.
 //!
 //! This module provides the core `Poly` type and vector wrappers (`PolyVecL`, `PolyVecK`)
 //! with all operations needed by the threshold signing protocol:
@@ -12,14 +12,14 @@
 //! All coefficient arithmetic uses centered representatives in `[-(q-1)/2, (q-1)/2]`
 //! where relevant (especially for norm computations).
 
-use crate::params::*;
+use crate::params::{N, Q, SEEDBYTES, CRHBYTES, ETA, GAMMA1, TAU, POLYT1_PACKEDBYTES, POLYZ_PACKEDBYTES, L, K, D, GAMMA2};
 use sha3::digest::{ExtendableOutput, Update, XofReader};
 use sha3::{Shake128, Shake256};
 use zeroize::Zeroize;
 
 // ─── Core Polynomial Type ────────────────────────────────────────────
 
-/// A polynomial in ℤ_q\[X\]/(X^256 + 1), stored as 256 coefficients.
+/// A polynomial in `ℤ_q`\[X\]/(X^256 + 1), stored as 256 coefficients.
 #[derive(Clone, Zeroize)]
 pub struct Poly {
     pub coeffs: [i32; N],
@@ -39,20 +39,21 @@ impl Default for Poly {
 
 impl Poly {
     /// Zero polynomial.
+    #[must_use] 
     pub fn zero() -> Self {
         Poly { coeffs: [0i32; N] }
     }
 
     /// Reduce all coefficients to [0, q).
     pub fn reduce(&mut self) {
-        for c in self.coeffs.iter_mut() {
+        for c in &mut self.coeffs {
             *c = reduce_i32(*c);
         }
     }
 
     /// Add q to negative coefficients to get canonical [0, q) form.
     pub fn caddq(&mut self) {
-        for c in self.coeffs.iter_mut() {
+        for c in &mut self.coeffs {
             *c += (*c >> 31) & Q;
         }
     }
@@ -93,7 +94,7 @@ impl Poly {
     pub fn pointwise_montgomery(c: &mut Poly, a: &Poly, b: &Poly) {
         for i in 0..N {
             c.coeffs[i] =
-                dilithium::reduce::montgomery_reduce(a.coeffs[i] as i64 * b.coeffs[i] as i64);
+                dilithium::reduce::montgomery_reduce(i64::from(a.coeffs[i]) * i64::from(b.coeffs[i]));
         }
     }
 
@@ -103,19 +104,21 @@ impl Poly {
     ///
     /// Each coefficient is mapped to the centered range [-(q-1)/2, (q-1)/2]
     /// before squaring. This is critical for the hyperball rejection check.
+    #[must_use] 
     pub fn l2_norm_squared(&self) -> u64 {
         let mut norm: u64 = 0;
-        for &c in self.coeffs.iter() {
+        for &c in &self.coeffs {
             let centered = center(c);
-            norm += (centered as i64 * centered as i64) as u64;
+            norm += (i64::from(centered) * i64::from(centered)) as u64;
         }
         norm
     }
 
     /// Compute the L∞ norm: max |coefficient| using centered representatives.
+    #[must_use] 
     pub fn l_inf_norm(&self) -> u32 {
         let mut max = 0u32;
-        for &c in self.coeffs.iter() {
+        for &c in &self.coeffs {
             let centered = center(c);
             let abs = centered.unsigned_abs();
             if abs > max {
@@ -129,10 +132,11 @@ impl Poly {
     ///
     /// Constant-time: iterates all coefficients without early exit
     /// to prevent timing side-channels on secret-dependent data.
+    #[must_use] 
     pub fn chknorm(&self, bound: i32) -> bool {
         let bound_u = bound as u32;
         let mut exceeded = 0u32;
-        for &c in self.coeffs.iter() {
+        for &c in &self.coeffs {
             let centered = center(c);
             // Accumulate without branching
             exceeded |= (bound_u.wrapping_sub(centered.unsigned_abs().wrapping_add(1))) >> 31;
@@ -143,7 +147,7 @@ impl Poly {
     // ─── Sampling ────────────────────────────────────────────────────
 
     /// Sample a uniformly random polynomial with coefficients in [0, q)
-    /// using rejection sampling from SHAKE-128. (ExpandA)
+    /// using rejection sampling from SHAKE-128. (`ExpandA`)
     pub fn uniform(a: &mut Poly, seed: &[u8; SEEDBYTES], nonce: u16) {
         let mut hasher = Shake128::default();
         hasher.update(seed);
@@ -154,7 +158,7 @@ impl Poly {
         let mut buf = [0u8; 3];
         while ctr < N {
             reader.read(&mut buf);
-            let t = ((buf[0] as u32) | ((buf[1] as u32) << 8) | ((buf[2] as u32) << 16)) & 0x7FFFFF;
+            let t = (u32::from(buf[0]) | (u32::from(buf[1]) << 8) | (u32::from(buf[2]) << 16)) & 0x7FFFFF;
             if t < Q as u32 {
                 a.coeffs[ctr] = t as i32;
                 ctr += 1;
@@ -163,7 +167,7 @@ impl Poly {
     }
 
     /// Sample a short polynomial with coefficients in [-η, η].
-    /// Uses SHAKE-256 (ExpandS). For ML-DSA-44, η = 2.
+    /// Uses SHAKE-256 (`ExpandS`). For ML-DSA-44, η = 2.
     pub fn uniform_eta(a: &mut Poly, seed: &[u8; CRHBYTES], nonce: u16) {
         let mut hasher = Shake256::default();
         hasher.update(seed);
@@ -175,8 +179,8 @@ impl Poly {
         // η = 2: sample from {0,1,2,3,4} then subtract η
         while ctr < N {
             reader.read(&mut buf);
-            let t0 = (buf[0] & 0x0F) as i32;
-            let t1 = (buf[0] >> 4) as i32;
+            let t0 = i32::from(buf[0] & 0x0F);
+            let t1 = i32::from(buf[0] >> 4);
             if t0 < 5 {
                 // For η=2: coefficients are in {0,1,2,3,4} → map to {-2,-1,0,1,2}
                 a.coeffs[ctr] = ETA as i32 - t0;
@@ -190,7 +194,7 @@ impl Poly {
     }
 
     /// Sample a masking polynomial with coefficients in [-(γ₁-1), γ₁].
-    /// (ExpandMask, Algorithm 24 in FIPS 204)
+    /// (`ExpandMask`, Algorithm 24 in FIPS 204)
     pub fn uniform_gamma1(a: &mut Poly, seed: &[u8; CRHBYTES], nonce: u16) {
         let mut hasher = Shake256::default();
         hasher.update(seed);
@@ -207,9 +211,9 @@ impl Poly {
                 let mut val = 0u32;
                 let base = j * 18 / 8;
                 if base + 2 < 9 {
-                    val = (buf[base] as u32)
-                        | ((buf[base + 1] as u32) << 8)
-                        | ((buf[base + 2] as u32) << 16);
+                    val = u32::from(buf[base])
+                        | (u32::from(buf[base + 1]) << 8)
+                        | (u32::from(buf[base + 2]) << 16);
                     val = (val >> (j * 18 % 8)) & 0x3FFFF; // 18-bit mask
                 }
                 a.coeffs[ctr] = GAMMA1 - (val as i32);
@@ -222,7 +226,7 @@ impl Poly {
     }
 
     /// Compute the challenge polynomial c from the hash c̃.
-    /// (SampleInBall, Algorithm 22 in FIPS 204)
+    /// (`SampleInBall`, Algorithm 22 in FIPS 204)
     ///
     /// Produces a polynomial with exactly τ non-zero (±1) coefficients.
     pub fn challenge(c: &mut Poly, seed: &[u8]) {
@@ -274,13 +278,13 @@ impl Poly {
     pub fn unpack_t1(r: &mut Poly, a: &[u8]) {
         debug_assert!(a.len() >= POLYT1_PACKEDBYTES);
         for i in 0..N / 4 {
-            r.coeffs[4 * i] = ((a[5 * i] as i32) | ((a[5 * i + 1] as i32) << 8)) & 0x3FF;
+            r.coeffs[4 * i] = (i32::from(a[5 * i]) | (i32::from(a[5 * i + 1]) << 8)) & 0x3FF;
             r.coeffs[4 * i + 1] =
-                (((a[5 * i + 1] as i32) >> 2) | ((a[5 * i + 2] as i32) << 6)) & 0x3FF;
+                ((i32::from(a[5 * i + 1]) >> 2) | (i32::from(a[5 * i + 2]) << 6)) & 0x3FF;
             r.coeffs[4 * i + 2] =
-                (((a[5 * i + 2] as i32) >> 4) | ((a[5 * i + 3] as i32) << 4)) & 0x3FF;
+                ((i32::from(a[5 * i + 2]) >> 4) | (i32::from(a[5 * i + 3]) << 4)) & 0x3FF;
             r.coeffs[4 * i + 3] =
-                (((a[5 * i + 3] as i32) >> 6) | ((a[5 * i + 4] as i32) << 2)) & 0x3FF;
+                ((i32::from(a[5 * i + 3]) >> 6) | (i32::from(a[5 * i + 4]) << 2)) & 0x3FF;
         }
     }
 
@@ -312,22 +316,22 @@ impl Poly {
         debug_assert!(a.len() >= POLYZ_PACKEDBYTES);
         for i in 0..N / 4 {
             r.coeffs[4 * i] =
-                (a[9 * i] as i32) | ((a[9 * i + 1] as i32) << 8) | ((a[9 * i + 2] as i32) << 16);
+                i32::from(a[9 * i]) | (i32::from(a[9 * i + 1]) << 8) | (i32::from(a[9 * i + 2]) << 16);
             r.coeffs[4 * i] &= 0x3FFFF;
 
-            r.coeffs[4 * i + 1] = ((a[9 * i + 2] as i32) >> 2)
-                | ((a[9 * i + 3] as i32) << 6)
-                | ((a[9 * i + 4] as i32) << 14);
+            r.coeffs[4 * i + 1] = (i32::from(a[9 * i + 2]) >> 2)
+                | (i32::from(a[9 * i + 3]) << 6)
+                | (i32::from(a[9 * i + 4]) << 14);
             r.coeffs[4 * i + 1] &= 0x3FFFF;
 
-            r.coeffs[4 * i + 2] = ((a[9 * i + 4] as i32) >> 4)
-                | ((a[9 * i + 5] as i32) << 4)
-                | ((a[9 * i + 6] as i32) << 12);
+            r.coeffs[4 * i + 2] = (i32::from(a[9 * i + 4]) >> 4)
+                | (i32::from(a[9 * i + 5]) << 4)
+                | (i32::from(a[9 * i + 6]) << 12);
             r.coeffs[4 * i + 2] &= 0x3FFFF;
 
-            r.coeffs[4 * i + 3] = ((a[9 * i + 6] as i32) >> 6)
-                | ((a[9 * i + 7] as i32) << 2)
-                | ((a[9 * i + 8] as i32) << 10);
+            r.coeffs[4 * i + 3] = (i32::from(a[9 * i + 6]) >> 6)
+                | (i32::from(a[9 * i + 7]) << 2)
+                | (i32::from(a[9 * i + 8]) << 10);
             r.coeffs[4 * i + 3] &= 0x3FFFF;
 
             for j in 0..4 {
@@ -347,7 +351,7 @@ pub struct PolyVecL {
 
 impl core::fmt::Debug for PolyVecL {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        write!(f, "PolyVecL([...; {}])", L)
+        write!(f, "PolyVecL([...; {L}])")
     }
 }
 
@@ -358,6 +362,7 @@ impl Default for PolyVecL {
 }
 
 impl PolyVecL {
+    #[must_use] 
     pub fn zero() -> Self {
         PolyVecL {
             polys: core::array::from_fn(|_| Poly::zero()),
@@ -366,14 +371,14 @@ impl PolyVecL {
 
     /// Forward NTT on all component polynomials.
     pub fn ntt(&mut self) {
-        for p in self.polys.iter_mut() {
+        for p in &mut self.polys {
             p.ntt();
         }
     }
 
     /// Inverse NTT on all component polynomials.
     pub fn invntt_tomont(&mut self) {
-        for p in self.polys.iter_mut() {
+        for p in &mut self.polys {
             p.invntt_tomont();
         }
     }
@@ -402,22 +407,25 @@ impl PolyVecL {
     }
 
     /// Squared L₂ norm of the entire vector: Σ ‖pᵢ‖₂².
+    #[must_use] 
     pub fn l2_norm_squared(&self) -> u64 {
-        self.polys.iter().map(|p| p.l2_norm_squared()).sum()
+        self.polys.iter().map(Poly::l2_norm_squared).sum()
     }
 
-    /// L∞ norm of the entire vector: max_i ‖pᵢ‖∞.
+    /// L∞ norm of the entire vector: `max_i` ‖pᵢ‖∞.
+    #[must_use] 
     pub fn l_inf_norm(&self) -> u32 {
-        self.polys.iter().map(|p| p.l_inf_norm()).max().unwrap_or(0)
+        self.polys.iter().map(Poly::l_inf_norm).max().unwrap_or(0)
     }
 
     /// Check if any component has ‖·‖∞ ≥ bound.
     ///
     /// Constant-time: accumulates result across all polynomials
     /// without short-circuit to prevent timing leaks (ALG-4).
+    #[must_use] 
     pub fn chknorm(&self, bound: i32) -> bool {
         let mut result = false;
-        for p in self.polys.iter() {
+        for p in &self.polys {
             result |= p.chknorm(bound);
         }
         result
@@ -425,14 +433,14 @@ impl PolyVecL {
 
     /// Reduce all coefficients.
     pub fn reduce(&mut self) {
-        for p in self.polys.iter_mut() {
+        for p in &mut self.polys {
             p.reduce();
         }
     }
 
     /// Add q to negative coefficients.
     pub fn caddq(&mut self) {
-        for p in self.polys.iter_mut() {
+        for p in &mut self.polys {
             p.caddq();
         }
     }
@@ -446,7 +454,7 @@ pub struct PolyVecK {
 
 impl core::fmt::Debug for PolyVecK {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        write!(f, "PolyVecK([...; {}])", K)
+        write!(f, "PolyVecK([...; {K}])")
     }
 }
 
@@ -457,6 +465,7 @@ impl Default for PolyVecK {
 }
 
 impl PolyVecK {
+    #[must_use] 
     pub fn zero() -> Self {
         PolyVecK {
             polys: core::array::from_fn(|_| Poly::zero()),
@@ -464,13 +473,13 @@ impl PolyVecK {
     }
 
     pub fn ntt(&mut self) {
-        for p in self.polys.iter_mut() {
+        for p in &mut self.polys {
             p.ntt();
         }
     }
 
     pub fn invntt_tomont(&mut self) {
-        for p in self.polys.iter_mut() {
+        for p in &mut self.polys {
             p.invntt_tomont();
         }
     }
@@ -496,31 +505,34 @@ impl PolyVecK {
         }
     }
 
+    #[must_use] 
     pub fn l2_norm_squared(&self) -> u64 {
-        self.polys.iter().map(|p| p.l2_norm_squared()).sum()
+        self.polys.iter().map(Poly::l2_norm_squared).sum()
     }
 
+    #[must_use] 
     pub fn l_inf_norm(&self) -> u32 {
-        self.polys.iter().map(|p| p.l_inf_norm()).max().unwrap_or(0)
+        self.polys.iter().map(Poly::l_inf_norm).max().unwrap_or(0)
     }
 
     /// Constant-time norm check across all polynomials (ALG-4).
+    #[must_use] 
     pub fn chknorm(&self, bound: i32) -> bool {
         let mut result = false;
-        for p in self.polys.iter() {
+        for p in &self.polys {
             result |= p.chknorm(bound);
         }
         result
     }
 
     pub fn reduce(&mut self) {
-        for p in self.polys.iter_mut() {
+        for p in &mut self.polys {
             p.reduce();
         }
     }
 
     pub fn caddq(&mut self) {
-        for p in self.polys.iter_mut() {
+        for p in &mut self.polys {
             p.caddq();
         }
     }
@@ -528,14 +540,15 @@ impl PolyVecK {
 
 // ─── Matrix × Vector Product ─────────────────────────────────────────
 
-/// The public matrix A ∈ ℤ_q^{K×L}, stored in NTT domain.
+/// The public matrix A ∈ `ℤ_q^{K×L`}, stored in NTT domain.
 #[derive(Clone)]
 pub struct MatrixA {
     pub rows: [[Poly; L]; K],
 }
 
 impl MatrixA {
-    /// Expand the matrix A from seed ρ using SHAKE-128 (ExpandA).
+    /// Expand the matrix A from seed ρ using SHAKE-128 (`ExpandA`).
+    #[must_use] 
     pub fn expand(rho: &[u8; SEEDBYTES]) -> Self {
         let mut rows: [[Poly; L]; K] =
             core::array::from_fn(|_| core::array::from_fn(|_| Poly::zero()));
@@ -551,6 +564,7 @@ impl MatrixA {
 
     /// Compute t = A·v (in NTT domain).
     /// Both A and v must be in NTT form. Result is in NTT form.
+    #[must_use] 
     pub fn mul_vec(&self, v: &PolyVecL) -> PolyVecK {
         let mut t = PolyVecK::zero();
         for i in 0..K {
@@ -596,10 +610,11 @@ fn center(mut a: i32) -> i32 {
 
 // ─── Power2Round / Decompose / Hint (FIPS 204 §4) ────────────────────
 
-/// Power2Round: split a into (a₁, a₀) such that a = a₁·2^d + a₀.
+/// `Power2Round`: split a into (a₁, a₀) such that a = a₁·2^d + a₀.
 ///
 /// Assumes a is a standard representative in [0, q).
 /// Faithful port of the CRYSTALS-Dilithium reference.
+#[must_use] 
 pub fn power2round(a: i32) -> (i32, i32) {
     let a_pos = reduce_i32(a);
     let a1 = (a_pos + (1 << (D - 1)) - 1) >> D;
@@ -614,6 +629,7 @@ pub fn power2round(a: i32) -> (i32, i32) {
 /// the CRYSTALS-Dilithium reference implementation.
 ///
 /// Returns (a₁, a₀) where a₁ ∈ [0, 43] and a₀ ∈ (−γ₂, γ₂].
+#[must_use] 
 pub fn decompose(a: i32) -> (i32, i32) {
     let a_pos = reduce_i32(a);
 
@@ -631,20 +647,22 @@ pub fn decompose(a: i32) -> (i32, i32) {
     (a1, a0)
 }
 
-/// MakeHint: compute the hint bit indicating whether low bits overflow
+/// `MakeHint`: compute the hint bit indicating whether low bits overflow
 /// into high bits.
 ///
 /// Parameters a0, a1 are the raw outputs of `decompose` (a0 is already
 /// in signed/centered form). Faithful port of the reference.
 #[allow(clippy::manual_range_contains)]
+#[must_use] 
 pub fn make_hint(a0: i32, a1: i32) -> bool {
     a0 > GAMMA2 || a0 < -GAMMA2 || (a0 == -GAMMA2 && a1 != 0)
 }
 
-/// UseHint: correct high bits according to hint.
+/// `UseHint`: correct high bits according to hint.
 ///
 /// For γ₂ = (q−1)/88 (ML-DSA-44), a₁ wraps around at 43.
 /// Faithful port of the reference.
+#[must_use] 
 pub fn use_hint(a: i32, hint: bool) -> i32 {
     let (a1, a0) = decompose(a);
     if !hint {
