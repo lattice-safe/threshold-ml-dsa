@@ -22,6 +22,20 @@
 //! ```
 
 #![cfg_attr(not(feature = "std"), no_std)]
+// Accepted pedantic lints for crypto coefficient arithmetic:
+#![allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    clippy::cast_sign_loss,
+    clippy::cast_precision_loss,
+    clippy::similar_names,
+    clippy::many_single_char_names,
+    clippy::too_many_lines,
+    clippy::unreadable_literal,
+    clippy::needless_continue,
+    clippy::manual_let_else,
+    clippy::missing_errors_doc
+)]
 
 #[cfg(not(feature = "std"))]
 extern crate alloc;

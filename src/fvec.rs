@@ -13,6 +13,7 @@ extern crate alloc;
 
 use crate::params::{FVEC_DIM, K, L, N, Q};
 use crate::poly::{PolyVecK, PolyVecL};
+use zeroize::Zeroize;
 use sha3::{
     digest::{ExtendableOutput, Update, XofReader},
     Shake256,
@@ -31,13 +32,9 @@ pub struct FVec {
 
 impl Drop for FVec {
     fn drop(&mut self) {
-        // Overwrite all coefficients with zero.
-        // Use write_volatile to prevent the compiler from eliding the wipe.
-        for c in &mut self.coeffs {
-            // SAFETY: c is a valid mutable reference to an f64
-            unsafe { core::ptr::write_volatile(c, 0.0) };
-        }
-        core::sync::atomic::compiler_fence(core::sync::atomic::Ordering::SeqCst);
+        // Wipe sensitive randomness from memory.
+        // Uses zeroize's volatile write to prevent compiler elision.
+        self.coeffs.zeroize();
     }
 }
 
