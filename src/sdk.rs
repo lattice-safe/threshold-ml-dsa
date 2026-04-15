@@ -14,6 +14,9 @@ use crate::poly::{PolyVecK, PolyVecL};
 use crate::rss;
 use crate::verify;
 use rand_core::{CryptoRng, RngCore};
+use sha3::digest::{ExtendableOutput, Update, XofReader};
+use sha3::Shake256;
+use zeroize::Zeroize;
 
 /// High-level threshold ML-DSA-44 SDK.
 ///
@@ -35,14 +38,8 @@ impl ThresholdMlDsa44Sdk {
     ///
     /// Generates fresh threshold keys using the paper's keygen (Figure 4).
     /// Returns the SDK instance ready for signing.
-    pub fn from_seed(
-        seed: &[u8; 32],
-        t: u8,
-        n: u8,
-        max_retries: usize,
-    ) -> Result<Self, Error> {
-        let params = get_threshold_params(t, n)
-            .ok_or(Error::InvalidParameters)?;
+    pub fn from_seed(seed: &[u8; 32], t: u8, n: u8, max_retries: usize) -> Result<Self, Error> {
+        let params = get_threshold_params(t, n).ok_or(Error::InvalidParameters)?;
 
         if max_retries == 0 {
             return Err(Error::InvalidParameters);
@@ -50,7 +47,12 @@ impl ThresholdMlDsa44Sdk {
 
         let (pk, sks) = rss::keygen_from_seed(seed, &params);
 
-        Ok(Self { pk, sks, params, max_retries })
+        Ok(Self {
+            pk,
+            sks,
+            params,
+            max_retries,
+        })
     }
 
     /// Sign a message using threshold signing.
@@ -84,7 +86,20 @@ impl ThresholdMlDsa44Sdk {
             act |= 1 << id;
         }
 
-        for _attempt in 0..self.max_retries {
+        'attempt: for _attempt in 0..self.max_retries {
+            // Session binding for this signing attempt.
+            let mut session_entropy = [0u8; 32];
+            rng.fill_bytes(&mut session_entropy);
+            let mut h = Shake256::default();
+            h.update(b"th-ml-dsa-session-v1");
+            h.update(&session_entropy);
+            h.update(&self.pk);
+            h.update(&[act]);
+            h.update(msg);
+            let mut session_id = [0u8; 32];
+            h.finalize_xof().read(&mut session_id);
+            session_entropy.zeroize();
+
             // ── Round 1: Each party generates K commitments ──
             let mut rd1_hashes: Vec<[u8; 32]> = Vec::with_capacity(t);
             let mut rd1_states: Vec<sign::StRound1> = Vec::with_capacity(t);
@@ -92,7 +107,7 @@ impl ThresholdMlDsa44Sdk {
             for &party_id in active {
                 let sk = &self.sks[party_id as usize];
                 // Clone rng bytes for each party (in production, each party has its own RNG)
-                let (hash, st1) = sign::round1(sk, &self.params, rng)?;
+                let (hash, st1) = sign::round1(sk, &self.params, act, msg, &session_id, rng)?;
                 rd1_hashes.push(hash);
                 rd1_states.push(st1);
             }
@@ -103,11 +118,37 @@ impl ThresholdMlDsa44Sdk {
 
             for (idx, &party_id) in active.iter().enumerate() {
                 let sk = &self.sks[party_id as usize];
-                let (reveal, st2) = sign::round2(
-                    sk, act, msg, &rd1_hashes, &rd1_states[idx], &self.params,
-                );
+                let (reveal, st2) = match sign::round2(
+                    sk,
+                    act,
+                    msg,
+                    &session_id,
+                    &rd1_hashes,
+                    &rd1_hashes[idx],
+                    &rd1_states[idx],
+                    &self.params,
+                ) {
+                    Ok(v) => v,
+                    Err(_) => continue 'attempt,
+                };
                 rd2_reveals.push(reveal);
                 rd2_states.push(st2);
+            }
+
+            // Verify each reveal against its Round 1 commitment hash.
+            for (idx, &party_id) in active.iter().enumerate() {
+                let tr = &self.sks[party_id as usize].tr;
+                if !sign::verify_round2_reveal(
+                    tr,
+                    party_id,
+                    act,
+                    msg,
+                    &session_id,
+                    &rd2_reveals[idx],
+                    &rd1_hashes[idx],
+                ) {
+                    continue 'attempt;
+                }
             }
 
             // ── Aggregate commitments ──
@@ -133,7 +174,11 @@ impl ThresholdMlDsa44Sdk {
             for (idx, &party_id) in active.iter().enumerate() {
                 let sk = &self.sks[party_id as usize];
                 let zs = sign::round3(
-                    sk, &wfinals, &rd1_states[idx], &rd2_states[idx], &self.params,
+                    sk,
+                    &wfinals,
+                    &rd1_states[idx],
+                    &rd2_states[idx],
+                    &self.params,
                 );
                 all_responses.push(zs);
             }
@@ -144,7 +189,7 @@ impl ThresholdMlDsa44Sdk {
             match coordinator::combine(&self.pk, msg, &wfinals, &zfinals, &self.params) {
                 Ok(sig) => {
                     // Fail-closed: verify before returning
-                    if verify::verify(&self.pk, msg, &sig) {
+                    if verify::verify(&sig, msg, &self.pk) {
                         return Ok(sig);
                     }
                     // Signature didn't verify — retry
@@ -159,7 +204,7 @@ impl ThresholdMlDsa44Sdk {
 
     /// Verify a signature using the standard ML-DSA-44 verifier.
     pub fn verify(&self, msg: &[u8], sig: &[u8]) -> bool {
-        verify::verify(&self.pk, msg, sig)
+        verify::verify(sig, msg, &self.pk)
     }
 }
 

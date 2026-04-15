@@ -1,4 +1,4 @@
-use threshold_ml_dsa::poly::{Poly, decompose};
+use threshold_ml_dsa::poly::{decompose, Poly};
 
 #[test]
 fn test_invntt() {

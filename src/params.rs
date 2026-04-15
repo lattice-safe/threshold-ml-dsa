@@ -145,7 +145,14 @@ pub fn get_threshold_params(t: u8, n: u8) -> Option<ThresholdParams> {
         _ => return None,
     };
 
-    Some(ThresholdParams { t, n, r, r1, k_reps, nu })
+    Some(ThresholdParams {
+        t,
+        n,
+        r,
+        r1,
+        k_reps,
+        nu,
+    })
 }
 
 /// Compute C(n, k) = n! / (k! (n-k)!)
@@ -185,9 +192,21 @@ mod tests {
     fn test_all_param_sets_exist() {
         // All 15 valid (T, N) pairs from Figure 8
         let valid = [
-            (2, 2), (2, 3), (3, 3), (2, 4), (3, 4), (4, 4),
-            (2, 5), (3, 5), (4, 5), (5, 5),
-            (2, 6), (3, 6), (4, 6), (5, 6), (6, 6),
+            (2, 2),
+            (2, 3),
+            (3, 3),
+            (2, 4),
+            (3, 4),
+            (4, 4),
+            (2, 5),
+            (3, 5),
+            (4, 5),
+            (5, 5),
+            (2, 6),
+            (3, 6),
+            (4, 6),
+            (5, 6),
+            (6, 6),
         ];
         for (t, n) in valid {
             let p = get_threshold_params(t, n)

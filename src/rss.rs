@@ -146,6 +146,18 @@ pub fn keygen_from_seed(
 ) -> ([u8; PK_BYTES], Vec<ThresholdPrivateKey>) {
     let n = params.n;
     let t = params.t;
+    assert!(
+        t >= 2 && t <= n,
+        "invalid threshold parameters: t={}, n={}",
+        t,
+        n
+    );
+    assert!(
+        (n as usize) <= MAX_PARTIES,
+        "unsupported party count n={}, max={}",
+        n,
+        MAX_PARTIES
+    );
 
     // Expand seed via SHAKE-256
     let mut h = Shake256::default();
@@ -181,9 +193,12 @@ pub fn keygen_from_seed(
     // Enumerate all (N-T+1)-subsets using Gosper's hack on bitmasks.
     // Start with the lexicographically smallest bitmask with (N-T+1) bits set.
     let subset_size = n - t + 1;
-    let mut mask: u8 = (1u8 << subset_size) - 1; // e.g., for size=2: 0b11
+    let mut mask: u16 = (1u16 << subset_size) - 1; // e.g., for size=2: 0b11
+    let limit: u16 = 1u16 << n;
 
-    while (mask as u16) < (1u16 << n) {
+    while mask < limit {
+        let subset_mask = mask as u8;
+
         // Sample a fresh independent secret s_I from χ_s
         let mut sseed = [0u8; 64];
         reader.read(&mut sseed);
@@ -207,8 +222,8 @@ pub fn keygen_from_seed(
 
         // 4. Distribute to all parties in this subset
         for i in 0..n {
-            if mask & (1 << i) != 0 {
-                sks[i as usize].shares.insert(mask, share.clone());
+            if subset_mask & (1 << i) != 0 {
+                sks[i as usize].shares.insert(subset_mask, share.clone());
             }
         }
 
@@ -220,7 +235,13 @@ pub fn keygen_from_seed(
 
         // Gosper's hack: advance to next subset bitmask with same popcount
         let c = mask & mask.wrapping_neg();
+        if c == 0 {
+            break;
+        }
         let r = mask.wrapping_add(c);
+        if r >= limit {
+            break;
+        }
         mask = (((r ^ mask) >> 2) / c) | r;
     }
 
@@ -277,12 +298,12 @@ fn sample_leq_eta(p: &mut Poly, seed: &[u8; 64], nonce: u16) {
             if ETA == 2 {
                 if t1 <= 14 {
                     let reduced = t1 - ((205 * t1) >> 10) * 5;
-                    p.coeffs[i] = ETA as i32 - reduced as i32;
+                    p.coeffs[i] = Q + ETA as i32 - reduced as i32;
                     i += 1;
                 }
                 if t2 <= 14 && i < N {
                     let reduced = t2 - ((205 * t2) >> 10) * 5;
-                    p.coeffs[i] = ETA as i32 - reduced as i32;
+                    p.coeffs[i] = Q + ETA as i32 - reduced as i32;
                     i += 1;
                 }
             }
@@ -295,13 +316,12 @@ fn sample_leq_eta(p: &mut Poly, seed: &[u8; 64], nonce: u16) {
 /// Internally: t = A·NTT⁻¹(s₁_hat) + s₂, Power2Round(t) → (t₀, t₁)
 fn compute_public_key(rho: &[u8; 32], s1h_total: &PolyVecL, s2_total: &PolyVecK) -> [u8; PK_BYTES] {
     use dilithium::{
+        packing::pack_pk,
         poly::Poly as DPoly,
         polyvec::{
-            PolyVecK as DPolyVecK, PolyVecL as DPolyVecL,
-            matrix_expand, matrix_pointwise_montgomery,
-            polyveck_caddq, polyveck_add,
+            matrix_expand, matrix_pointwise_montgomery, polyveck_add, polyveck_caddq,
+            polyveck_reduce, PolyVecK as DPolyVecK, PolyVecL as DPolyVecL,
         },
-        packing::pack_pk,
         ML_DSA_44,
     };
 
@@ -337,6 +357,9 @@ fn compute_public_key(rho: &[u8; 32], s1h_total: &PolyVecL, s2_total: &PolyVecK)
     }
     let t_copy = t.clone();
     polyveck_add(mode, &mut t, &t_copy, &s2_d);
+    // Threshold keygen accumulates subset secrets modulo q; after adding s2,
+    // we must perform a full reduction before Power2Round.
+    polyveck_reduce(mode, &mut t);
     polyveck_caddq(mode, &mut t);
 
     // Power2Round(t) → (t0, t1)
@@ -409,7 +432,10 @@ impl core::fmt::Debug for PartyKeyShare {
         write!(
             f,
             "PartyKeyShare {{ party_id: {}, n: {}, t: {}, shares: {} }}",
-            self.party_id, self.n, self.t, self.s1_shares.len()
+            self.party_id,
+            self.n,
+            self.t,
+            self.s1_shares.len()
         )
     }
 }
@@ -452,9 +478,12 @@ mod tests {
             assert!(!sk.shares.is_empty());
             // Every share bitmask should include this party
             for (&mask, _) in &sk.shares {
-                assert!(mask & (1 << sk.id) != 0,
+                assert!(
+                    mask & (1 << sk.id) != 0,
                     "Party {} has share for subset 0b{:06b} which doesn't include it",
-                    sk.id, mask);
+                    sk.id,
+                    mask
+                );
             }
         }
 
@@ -478,9 +507,7 @@ mod tests {
 
     #[test]
     fn test_keygen_all_configs() {
-        let configs: &[(u8, u8)] = &[
-            (2, 2), (2, 3), (3, 3), (2, 4), (3, 4), (4, 4),
-        ];
+        let configs: &[(u8, u8)] = &[(2, 2), (2, 3), (3, 3), (2, 4), (3, 4), (4, 4)];
         for &(t, n) in configs {
             let seed = [t + n; 32];
             let params = get_threshold_params(t, n).unwrap();

@@ -46,17 +46,17 @@ pub fn rss_recover(active: &[u8], n: u8, t: u8) -> Vec<Vec<u8>> {
     // The Go reference uses these exact values.
     let sharing: Vec<Vec<u8>> = match (t, n) {
         (2, 3) => alloc::vec![
-            alloc::vec![3, 5],   // party 0: subsets {0,1}=3, {0,2}=5
-            alloc::vec![6],      // party 1: subset  {1,2}=6
+            alloc::vec![3, 5], // party 0: subsets {0,1}=3, {0,2}=5
+            alloc::vec![6],    // party 1: subset  {1,2}=6
         ],
         (2, 4) => alloc::vec![
             alloc::vec![11, 13], // {0,1,3}=11, {0,2,3}=13
             alloc::vec![7, 14],  // {0,1,2}=7,  {1,2,3}=14
         ],
         (3, 4) => alloc::vec![
-            alloc::vec![3, 9],   // {0,1}=3, {0,3}=9
-            alloc::vec![6, 10],  // {1,2}=6, {1,3}=10
-            alloc::vec![12, 5],  // {2,3}=12, {0,2}=5
+            alloc::vec![3, 9],  // {0,1}=3, {0,3}=9
+            alloc::vec![6, 10], // {1,2}=6, {1,3}=10
+            alloc::vec![12, 5], // {2,3}=12, {0,2}=5
         ],
         (2, 5) => alloc::vec![
             alloc::vec![27, 29, 23], // {0,1,3,4}=27, {0,2,3,4}=29, {0,1,2,4}=23
@@ -68,14 +68,14 @@ pub fn rss_recover(active: &[u8], n: u8, t: u8) -> Vec<Vec<u8>> {
             alloc::vec![28, 21],         // {2,3,4}=28, {0,2,4}=21
         ],
         (4, 5) => alloc::vec![
-            alloc::vec![3, 9, 17],   // {0,1}=3, {0,3}=9, {0,4}=17
-            alloc::vec![6, 10, 18],  // {1,2}=6, {1,3}=10, {1,4}=18
-            alloc::vec![12, 5, 20],  // {2,3}=12, {0,2}=5, {2,4}=20
-            alloc::vec![24],         // {3,4}=24
+            alloc::vec![3, 9, 17],  // {0,1}=3, {0,3}=9, {0,4}=17
+            alloc::vec![6, 10, 18], // {1,2}=6, {1,3}=10, {1,4}=18
+            alloc::vec![12, 5, 20], // {2,3}=12, {0,2}=5, {2,4}=20
+            alloc::vec![24],        // {3,4}=24
         ],
         (2, 6) => alloc::vec![
-            alloc::vec![61, 47, 55],  // {0,2,3,4,5}=61, {0,1,2,3,5}=47, {0,1,2,4,5}=55
-            alloc::vec![62, 31, 59],  // {1,2,3,4,5}=62, {0,1,2,3,4}=31, {0,1,3,4,5}=59
+            alloc::vec![61, 47, 55], // {0,2,3,4,5}=61, {0,1,2,3,5}=47, {0,1,2,4,5}=55
+            alloc::vec![62, 31, 59], // {1,2,3,4,5}=62, {0,1,2,3,4}=31, {0,1,3,4,5}=59
         ],
         (3, 6) => alloc::vec![
             alloc::vec![27, 23, 43, 57, 39],
@@ -89,11 +89,11 @@ pub fn rss_recover(active: &[u8], n: u8, t: u8) -> Vec<Vec<u8>> {
             alloc::vec![25, 11, 14, 56, 41],
         ],
         (5, 6) => alloc::vec![
-            alloc::vec![3, 5, 33],    // {0,1}, {0,2}, {0,5}
-            alloc::vec![6, 10, 34],   // {1,2}, {1,3}, {1,5}
-            alloc::vec![12, 20, 36],  // {2,3}, {2,4}, {2,5}
-            alloc::vec![9, 24, 40],   // {0,3}, {3,4}, {3,5}
-            alloc::vec![48, 17, 18],  // {4,5}, {0,4}, {1,4}
+            alloc::vec![3, 5, 33],   // {0,1}, {0,2}, {0,5}
+            alloc::vec![6, 10, 34],  // {1,2}, {1,3}, {1,5}
+            alloc::vec![12, 20, 36], // {2,3}, {2,4}, {2,5}
+            alloc::vec![9, 24, 40],  // {0,3}, {3,4}, {3,5}
+            alloc::vec![48, 17, 18], // {4,5}, {0,4}, {1,4}
         ],
         _ => panic!("Unsupported (T={}, N={}) — must be 2 ≤ T ≤ N ≤ 6", t, n),
     };
@@ -149,7 +149,10 @@ mod tests {
             all_subsets.len(),
             expected_count,
             "(T={}, N={}): expected {} subsets, got {} (duplicates or missing)",
-            t, n, expected_count, all_subsets.len()
+            t,
+            n,
+            expected_count,
+            all_subsets.len()
         );
     }
 
@@ -161,7 +164,8 @@ mod tests {
                 assert!(
                     mask & (1 << party) != 0,
                     "Party {} assigned subset 0b{:06b} which it doesn't belong to",
-                    party, mask
+                    party,
+                    mask
                 );
             }
         }
@@ -210,15 +214,33 @@ mod tests {
     #[test]
     fn test_all_valid_configs() {
         let configs: &[(u8, u8)] = &[
-            (2, 2), (2, 3), (3, 3), (2, 4), (3, 4), (4, 4),
-            (2, 5), (3, 5), (4, 5), (5, 5),
-            (2, 6), (3, 6), (4, 6), (5, 6), (6, 6),
+            (2, 2),
+            (2, 3),
+            (3, 3),
+            (2, 4),
+            (3, 4),
+            (4, 4),
+            (2, 5),
+            (3, 5),
+            (4, 5),
+            (5, 5),
+            (2, 6),
+            (3, 6),
+            (4, 6),
+            (5, 6),
+            (6, 6),
         ];
         for &(t, n) in configs {
             // Use canonical active set {0, 1, ..., T-1}
             let active: Vec<u8> = (0..t).collect();
             let p = rss_recover(&active, n, t);
-            assert_eq!(p.len(), t as usize, "Wrong partition size for ({}, {})", t, n);
+            assert_eq!(
+                p.len(),
+                t as usize,
+                "Wrong partition size for ({}, {})",
+                t,
+                n
+            );
             verify_partition_covers_all(&p, n, t);
             verify_party_membership(&active, &p);
         }

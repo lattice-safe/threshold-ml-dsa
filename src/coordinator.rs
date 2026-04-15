@@ -16,6 +16,7 @@ use crate::error::Error;
 use crate::params::*;
 use crate::poly::*;
 use crate::sign;
+use crate::verify;
 use sha3::digest::{ExtendableOutput, Update, XofReader};
 use sha3::Shake256;
 
@@ -103,14 +104,13 @@ pub fn combine(
     params: &ThresholdParams,
 ) -> Result<[u8; SIG_BYTES], Error> {
     use dilithium::{
+        packing::{pack_sig, unpack_pk},
         poly::Poly as DPoly,
         polyvec::{
-            PolyVecK as DPolyVecK, PolyVecL as DPolyVecL,
-            matrix_expand, matrix_pointwise_montgomery,
+            matrix_expand, matrix_pointwise_montgomery, PolyVecK as DPolyVecK,
+            PolyVecL as DPolyVecL,
         },
-        packing::{unpack_pk, pack_sig},
-        rounding,
-        ML_DSA_44,
+        rounding, ML_DSA_44,
     };
 
     let mode = ML_DSA_44;
@@ -134,7 +134,6 @@ pub fn combine(
     matrix_expand(mode, &mut mat, &rho);
 
     let k_reps = params.k_reps as usize;
-
     for k in 0..k_reps {
         // Check ‖z_k‖∞ < γ₁ - β
         if zfinals[k].chknorm(GAMMA1 - BETA) {
@@ -142,13 +141,16 @@ pub fn combine(
         }
 
         // Check z is not all-zero (hyperball rejection)
-        let all_zero = zfinals[k].polys.iter().all(|p| p.coeffs.iter().all(|&c| c == 0));
+        let all_zero = zfinals[k]
+            .polys
+            .iter()
+            .all(|p| p.coeffs.iter().all(|&c| c == 0));
         if all_zero {
             continue;
         }
 
         // Compute c̃ = H(μ ‖ w1_packed)
-        let (_, w1) = decompose_polyveck(&wfinals[k]);
+        let (w0, w1) = decompose_polyveck(&wfinals[k]);
         let c_tilde = compute_c_tilde(&mu, &w1);
 
         // Convert z to dilithium-rs format and NTT
@@ -192,56 +194,74 @@ pub fn combine(
         }
         // Now w_approx = Az - c·t₁·2^d in normal domain, [0, Q)
 
-        // Compute hints:
-        // Decompose w_approx to get HighBits(w_approx). If this differs
-        // from w₁ (used to compute c̃), set the hint bit.
-        // UseHint will correct HighBits(w_approx) by ±1 based on the
-        // sign of LowBits(w_approx), arriving at the correct w₁.
+        // Compute hints from:
+        //   f = (A*z - c*t1*2^d) - w
+        //   w0' = w0 + f
+        //   h = MakeHint(w0', w1)
+        // with (w0, w1) = Decompose(w).
+        //
+        // This follows the reference threshold Combine procedure.
         let mut hint = DPolyVecK::default();
         let mut hint_pop = 0usize;
+        let mut slot_valid = true;
         for i in 0..K {
             for j in 0..N {
-                let (wa1, wa0) = rounding::decompose(mode, w_approx.vec[i].coeffs[j]);
                 let target = w1.polys[i].coeffs[j];
-                if wa1 != target {
+                let approx = w_approx.vec[i].coeffs[j];
+
+                // f = approx - w (normalized to [0, Q))
+                let mut f = (approx - wfinals[k].polys[i].coeffs[j]).rem_euclid(Q);
+
+                // Reject this slot if ‖f‖∞ > γ2 (using centered representatives).
+                if f > (Q - 1) / 2 {
+                    f -= Q;
+                }
+                if f.unsigned_abs() > GAMMA2 as u32 {
+                    slot_valid = false;
+                    break;
+                }
+
+                // Build z0' = w0 + f in [0, Q), then center it for dilithium-rs
+                // `make_hint(mode, a0, a1)` which expects signed low bits a0.
+                let f_plus_q = if f < 0 { f + Q } else { f };
+                let hint_input = (w0.polys[i].coeffs[j] + f_plus_q).rem_euclid(Q);
+                let mut hint_low = hint_input;
+                if hint_low > (Q - 1) / 2 {
+                    hint_low -= Q;
+                }
+                let hint_bit = rounding::make_hint(mode, hint_low, target);
+                if hint_bit {
                     hint.vec[i].coeffs[j] = 1;
                     hint_pop += 1;
-                    // Verify the hint correction goes in the right direction
-                    let corrected = if wa0 > 0 {
-                        if wa1 == 43 { 0 } else { wa1 + 1 }
-                    } else if wa1 == 0 {
-                        43
-                    } else {
-                        wa1 - 1
-                    };
-                    if corrected != target {
-                        // Hint correction doesn't fix it — this slot is invalid
-                        hint_pop = OMEGA + 1; // Force rejection
-                        break;
-                    }
                 }
             }
-            if hint_pop > OMEGA {
+            if !slot_valid || hint_pop > OMEGA {
                 break;
             }
         }
 
-        if hint_pop > OMEGA {
+        if !slot_valid || hint_pop > OMEGA {
             continue;
         }
 
-        // Success! Pack the signature  
+        // Success! Pack the signature
         let mut z_d = DPolyVecL::default();
         for i in 0..L {
             for j in 0..N {
-                z_d.vec[i].coeffs[j] = zfinals[k].polys[i].coeffs[j];
+                let mut centered = zfinals[k].polys[i].coeffs[j].rem_euclid(Q);
+                if centered > (Q - 1) / 2 {
+                    centered -= Q;
+                }
+                z_d.vec[i].coeffs[j] = centered;
             }
         }
 
         let mut sig = [0u8; SIG_BYTES];
         pack_sig(mode, &mut sig, &c_tilde, &z_d, &hint);
 
-        return Ok(sig);
+        if verify::verify(&sig, msg, pk_bytes) {
+            return Ok(sig);
+        }
     }
 
     Err(Error::InsufficientResponses)
@@ -255,10 +275,10 @@ fn decompose_polyveck(w: &PolyVecK) -> (PolyVecK, PolyVecK) {
     let mut w1 = PolyVecK::zero();
     for i in 0..K {
         for j in 0..N {
-            let a = w.polys[i].coeffs[j];
-            let a_pos = if a < 0 { a + Q } else { a };
-            let (r1, r0) = rounding::decompose(mode, a_pos);
-            w0.polys[i].coeffs[j] = r0;
+            let a = w.polys[i].coeffs[j].rem_euclid(Q);
+            let (r1, r0) = rounding::decompose(mode, a);
+            let r0_plus_q = if r0 < 0 { r0 + Q } else { r0 };
+            w0.polys[i].coeffs[j] = r0_plus_q;
             w1.polys[i].coeffs[j] = r1;
         }
     }

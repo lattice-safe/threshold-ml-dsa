@@ -20,23 +20,26 @@ extern crate alloc;
 use alloc::vec::Vec;
 
 use crate::error::Error;
-use crate::fvec::{FVec, sample_hyperball};
+use crate::fvec::{sample_hyperball, FVec};
 use crate::params::*;
 use crate::partition;
 use crate::poly::{Poly, PolyVecK, PolyVecL};
 use crate::rss::ThresholdPrivateKey;
+use rand_core::{CryptoRng, RngCore};
 use sha3::digest::{ExtendableOutput, Update, XofReader};
 use sha3::Shake256;
-use rand_core::{CryptoRng, RngCore};
+use subtle::ConstantTimeEq;
+use zeroize::Zeroize;
 
 /// Round 1 state saved by a party for use in Round 3.
 pub struct StRound1 {
     /// K packed commitment vectors (each is K polynomials in normal domain)
     pub w_packed: Vec<Vec<u8>>,
-    /// K randomness samples as rounded integer polynomials (y ∈ ℤ^L, e ∈ ℤ^K)
-    /// These are the SAME integer values used to compute w = A·y + e,
-    /// ensuring algebraic consistency in the response z = c·s + y.
-    pub rand_polys: Vec<(PolyVecL, PolyVecK)>,
+    /// K randomness samples as floating vectors from SampleHyperball.
+    ///
+    /// Round 1 commitments use rounded copies of these vectors.
+    /// Round 3 adds them in floating-point before the final rounding step.
+    pub rand_fvecs: Vec<FVec>,
 }
 
 /// Round 2 state saved by a party for use in Round 3.
@@ -65,21 +68,39 @@ pub fn compute_mu(tr: &[u8; TRBYTES], msg: &[u8]) -> [u8; 64] {
 /// Round 1: generate K hyperball commitments.
 ///
 /// Returns:
-/// - `commitment_hash`: 32-byte hash H(tr ‖ id ‖ w_packed)
+/// - `commitment_hash`: 32-byte hash H(tag ‖ tr ‖ id ‖ act ‖ session ‖ μ ‖ w_packed)
 /// - `StRound1`: saved state for Round 3
 ///
 /// This matches the Go `Round1()` function.
 pub fn round1<R: RngCore + CryptoRng>(
     sk: &ThresholdPrivateKey,
     params: &ThresholdParams,
+    act: u8,
+    msg: &[u8],
+    session_id: &[u8; 32],
     rng: &mut R,
 ) -> Result<([u8; 32], StRound1), Error> {
-    // Generate 64-byte randomness for hyperball sampling
+    let mu = compute_mu(&sk.tr, msg);
+
+    // Hedged nonce derivation:
+    // bind RNG entropy to long-term per-party key and transcript context so
+    // RNG rollback does not trivially re-use nonces across distinct sessions.
+    let mut rng_entropy = [0u8; 64];
+    rng.fill_bytes(&mut rng_entropy);
     let mut rhop = [0u8; 64];
-    rng.fill_bytes(&mut rhop);
+    let mut rhop_h = Shake256::default();
+    rhop_h.update(b"th-ml-dsa-round1-rhop-v1");
+    rhop_h.update(&rng_entropy);
+    rhop_h.update(&sk.key);
+    rhop_h.update(&sk.tr);
+    rhop_h.update(&[sk.id, act]);
+    rhop_h.update(session_id);
+    rhop_h.update(&mu);
+    rhop_h.finalize_xof().read(&mut rhop);
+    rng_entropy.zeroize();
 
     let k_reps = params.k_reps as usize;
-    let mut rand_polys: Vec<(PolyVecL, PolyVecK)> = Vec::with_capacity(k_reps);
+    let mut rand_fvecs: Vec<FVec> = Vec::with_capacity(k_reps);
     let mut w_packed_all: Vec<Vec<u8>> = Vec::with_capacity(k_reps);
 
     // Expand A from ρ
@@ -122,20 +143,25 @@ pub fn round1<R: RngCore + CryptoRng>(
         let packed = pack_w_single(&w);
         w_packed_all.push(packed);
 
-        rand_polys.push((y, e_));
+        rand_fvecs.push(fv);
     }
 
-    // Compute commitment hash: H(tr ‖ id ‖ w_packed_all)
-    let mut h = Shake256::default();
-    h.update(&sk.tr);
-    h.update(&[sk.id]);
-    for packed in &w_packed_all {
-        h.update(packed);
-    }
-    let mut hash = [0u8; 32];
-    h.finalize_xof().read(&mut hash);
+    let hash = round1_commitment_hash(
+        &sk.tr,
+        sk.id,
+        act,
+        &mu,
+        session_id,
+        w_packed_all.iter().map(|chunk| chunk.as_slice()),
+    );
 
-    Ok((hash, StRound1 { w_packed: w_packed_all, rand_polys }))
+    Ok((
+        hash,
+        StRound1 {
+            w_packed: w_packed_all,
+            rand_fvecs,
+        },
+    ))
 }
 
 /// Round 2: reveal commitments and compute μ.
@@ -146,18 +172,31 @@ pub fn round2(
     sk: &ThresholdPrivateKey,
     act: u8,
     msg: &[u8],
+    session_id: &[u8; 32],
     msgs_rd1: &[[u8; 32]], // commitment hashes from Round 1
+    own_rd1_hash: &[u8; 32],
     st_rd1: &StRound1,
     _params: &ThresholdParams,
-) -> (Vec<u8>, StRound2) {
+) -> Result<(Vec<u8>, StRound2), Error> {
     // Concatenate all packed w data for this party's reveal
     let mut reveal_data = Vec::new();
     for packed in &st_rd1.w_packed {
         reveal_data.extend_from_slice(packed);
     }
 
-    // Save state for Round 3
+    // Verify this reveal is bound to the Round 1 commitment in constant-time.
     let mu = compute_mu(&sk.tr, msg);
+    let computed = round1_commitment_hash(
+        &sk.tr,
+        sk.id,
+        act,
+        &mu,
+        session_id,
+        st_rd1.w_packed.iter().map(|chunk| chunk.as_slice()),
+    );
+    if !bool::from(computed.ct_eq(own_rd1_hash)) {
+        return Err(Error::InvalidShare);
+    }
 
     let st2 = StRound2 {
         hashes: msgs_rd1.to_vec(),
@@ -165,7 +204,29 @@ pub fn round2(
         act,
     };
 
-    (reveal_data, st2)
+    Ok((reveal_data, st2))
+}
+
+/// Verify a Round 2 reveal against the sender's Round 1 commitment hash.
+pub fn verify_round2_reveal(
+    tr: &[u8; TRBYTES],
+    party_id: u8,
+    act: u8,
+    msg: &[u8],
+    session_id: &[u8; 32],
+    reveal_data: &[u8],
+    expected_hash: &[u8; 32],
+) -> bool {
+    let mu = compute_mu(tr, msg);
+    let computed = round1_commitment_hash(
+        tr,
+        party_id,
+        act,
+        &mu,
+        session_id,
+        core::iter::once(reveal_data),
+    );
+    bool::from(computed.ct_eq(expected_hash))
 }
 
 /// Round 3: compute K parallel responses with hyperball rejection.
@@ -178,19 +239,28 @@ pub fn round2(
 /// Responses that fail rejection are all-zero (coordinator will skip them).
 pub fn round3(
     sk: &ThresholdPrivateKey,
-    wfinals: &[PolyVecK],    // K aggregated commitment vectors
-    st_rd1: &StRound1,       // saved randomness from Round 1
-    st_rd2: &StRound2,       // μ and active set from Round 2
+    wfinals: &[PolyVecK], // K aggregated commitment vectors
+    st_rd1: &StRound1,    // saved randomness from Round 1
+    st_rd2: &StRound2,    // μ and active set from Round 2
     params: &ThresholdParams,
 ) -> Vec<PolyVecL> {
+    use dilithium::{
+        poly::Poly as DPoly,
+        polyvec::{polyveck_reduce, polyvecl_reduce, PolyVecK as DPolyVecK, PolyVecL as DPolyVecL},
+        ML_DSA_44,
+    };
+
     let k_reps = params.k_reps as usize;
+    let mode = ML_DSA_44;
 
     // Recover this party's partial secret for the active signer set
     let active = bitmask_to_sorted_ids(st_rd2.act, params.n);
     let partition = partition::rss_recover(&active, params.n, params.t);
 
     // Find which partition slot corresponds to this party
-    let party_idx = active.iter().position(|&id| id == sk.id)
+    let party_idx = active
+        .iter()
+        .position(|&id| id == sk.id)
         .expect("Party must be in active set");
 
     // Sum the shares assigned to this party by the partition.
@@ -198,6 +268,18 @@ pub fn round3(
     // because Share stores s1h = NTT(s1), so summing them gives NTT(Σ s1)
     // directly. Do NOT NTT again — that would double-transform.
     let (s1h, s2h) = recover_partial_secret(sk, &partition[party_idx]);
+    let mut s1h_d = DPolyVecL::default();
+    let mut s2h_d = DPolyVecK::default();
+    for j in 0..L {
+        for c in 0..N {
+            s1h_d.vec[j].coeffs[c] = s1h.polys[j].coeffs[c];
+        }
+    }
+    for j in 0..K {
+        for c in 0..N {
+            s2h_d.vec[j].coeffs[c] = s2h.polys[j].coeffs[c];
+        }
+    }
 
     let mut zs: Vec<PolyVecL> = Vec::with_capacity(k_reps);
 
@@ -209,42 +291,53 @@ pub fn round3(
         let c_tilde = compute_challenge(&st_rd2.mu, &w1);
 
         // Expand challenge polynomial c
-        let mut ch = Poly::zero();
-        Poly::challenge(&mut ch, &c_tilde);
+        let mut ch = DPoly::default();
+        DPoly::challenge(mode, &mut ch, &c_tilde);
         ch.ntt();
 
-        // Compute z = c·s₁ + y (integer arithmetic in NTT domain, then back)
-        let mut z = PolyVecL::zero();
+        // Compute z1 = c·s₁ (integer arithmetic in NTT domain, then back)
+        let mut z1 = PolyVecL::zero();
+        let mut z1_d = DPolyVecL::default();
         for j in 0..L {
-            Poly::pointwise_montgomery(&mut z.polys[j], &ch, &s1h.polys[j]);
-            z.polys[j].invntt_tomont();
+            DPoly::pointwise_montgomery(&mut z1_d.vec[j], &ch, &s1h_d.vec[j]);
+            z1_d.vec[j].invntt_tomont();
         }
-        z.reduce();
-        // Add the integer randomness y from round1
-        z.add_assign(&st_rd1.rand_polys[i].0);
-        z.reduce();
+        polyvecl_reduce(mode, &mut z1_d);
+        for j in 0..L {
+            for c in 0..N {
+                z1.polys[j].coeffs[c] = z1_d.vec[j].coeffs[c];
+            }
+        }
 
-        // Compute c·s₂ + e_ (for the rejection check)
-        let mut cs2 = PolyVecK::zero();
+        // Compute z2 = c·s₂.
+        let mut z2 = PolyVecK::zero();
+        let mut z2_d = DPolyVecK::default();
         for j in 0..K {
-            Poly::pointwise_montgomery(&mut cs2.polys[j], &ch, &s2h.polys[j]);
-            cs2.polys[j].invntt_tomont();
+            DPoly::pointwise_montgomery(&mut z2_d.vec[j], &ch, &s2h_d.vec[j]);
+            z2_d.vec[j].invntt_tomont();
         }
-        cs2.reduce();
-        // Add the integer randomness e_ from round1
-        cs2.add_assign(&st_rd1.rand_polys[i].1);
-        cs2.reduce();
+        polyveck_reduce(mode, &mut z2_d);
+        for j in 0..K {
+            for c in 0..N {
+                z2.polys[j].coeffs[c] = z2_d.vec[j].coeffs[c];
+            }
+        }
 
-        // Hyperball rejection: convert to FVec and check ‖z̃‖₂ ≤ r
-        let zf = FVec::from_polyvecs(&z, &cs2);
+        // Build the full floating response vector and add the sampled
+        // hyperball randomness from Round 1 before rejection/rounding.
+        let mut zf = FVec::from_polyvecs(&z1, &z2);
+        zf.add_assign(&st_rd1.rand_fvecs[i]);
         if zf.excess(params.r, params.nu) {
             // Rejection: emit zero response
             zs.push(PolyVecL::zero());
             continue;
         }
 
-        // Accepted — output z directly (already integer polynomials)
-        zs.push(z);
+        // Accepted — round zf back to integer polynomial vectors and output z1.
+        let mut z_out = PolyVecL::zero();
+        let mut z2_out = PolyVecK::zero();
+        zf.round_to_polyvecs(&mut z_out, &mut z2_out);
+        zs.push(z_out);
     }
 
     zs
@@ -255,7 +348,7 @@ pub fn round3(
 /// Expand A from ρ using dilithium-rs.
 fn expand_a(rho: &[u8; 32]) -> Vec<Vec<Poly>> {
     use dilithium::{
-        polyvec::{PolyVecL as DPolyVecL, matrix_expand},
+        polyvec::{matrix_expand, PolyVecL as DPolyVecL},
         ML_DSA_44,
     };
     let mode = ML_DSA_44;
@@ -278,7 +371,6 @@ fn expand_a(rho: &[u8; 32]) -> Vec<Vec<Poly>> {
     a
 }
 
-
 /// Size of a single packed PolyVecK (23 bits per coefficient, K×N coefficients).
 pub fn pack_w_single_size() -> usize {
     let poly_q_size = (N * 23).div_ceil(8);
@@ -294,7 +386,11 @@ pub fn pack_w_single(w: &PolyVecK) -> Vec<u8> {
     let mut bit_pos = 0usize;
     for poly in &w.polys {
         for &coeff in &poly.coeffs {
-            let val = if coeff < 0 { (coeff + Q) as u32 } else { coeff as u32 };
+            let val = if coeff < 0 {
+                (coeff + Q) as u32
+            } else {
+                coeff as u32
+            };
             // Write 23 bits at bit_pos
             let byte_pos = bit_pos / 8;
             let bit_off = bit_pos % 8;
@@ -343,11 +439,33 @@ fn bitmask_to_sorted_ids(mask: u8, n: u8) -> Vec<u8> {
     ids
 }
 
+fn round1_commitment_hash<'a, I>(
+    tr: &[u8; TRBYTES],
+    party_id: u8,
+    act: u8,
+    mu: &[u8; 64],
+    session_id: &[u8; 32],
+    packed_chunks: I,
+) -> [u8; 32]
+where
+    I: IntoIterator<Item = &'a [u8]>,
+{
+    let mut h = Shake256::default();
+    h.update(b"th-ml-dsa-round1-commit-v1");
+    h.update(tr);
+    h.update(&[party_id, act]);
+    h.update(session_id);
+    h.update(mu);
+    for chunk in packed_chunks {
+        h.update(chunk);
+    }
+    let mut out = [0u8; 32];
+    h.finalize_xof().read(&mut out);
+    out
+}
+
 /// Recover this party's partial secret from the assigned share bitmasks.
-fn recover_partial_secret(
-    sk: &ThresholdPrivateKey,
-    assigned_masks: &[u8],
-) -> (PolyVecL, PolyVecK) {
+fn recover_partial_secret(sk: &ThresholdPrivateKey, assigned_masks: &[u8]) -> (PolyVecL, PolyVecK) {
     let mut s1h = PolyVecL::zero();
     let mut s2h = PolyVecK::zero();
 
@@ -368,11 +486,7 @@ fn recover_partial_secret(
 /// `dilithium::rounding::decompose()`, otherwise the challenge hash c̃ will
 /// differ between round3 and combine, causing 100% delta rejection.
 fn decompose_veck(w: &PolyVecK) -> (PolyVecK, PolyVecK) {
-    use dilithium::{
-        polyvec::PolyVecK as DPolyVecK,
-        polyvec::polyveck_decompose,
-        ML_DSA_44,
-    };
+    use dilithium::{polyvec::polyveck_decompose, polyvec::PolyVecK as DPolyVecK, ML_DSA_44};
     let mode = ML_DSA_44;
 
     let mut w_ref = DPolyVecK::default();
@@ -395,11 +509,7 @@ fn decompose_veck(w: &PolyVecK) -> (PolyVecK, PolyVecK) {
 
 /// Compute challenge hash c̃ = H(μ ‖ w₁_packed).
 fn compute_challenge(mu: &[u8; 64], w1: &PolyVecK) -> [u8; CTILDEBYTES] {
-    use dilithium::{
-        polyvec::PolyVecK as DPolyVecK,
-        polyvec::polyveck_pack_w1,
-        ML_DSA_44,
-    };
+    use dilithium::{polyvec::polyveck_pack_w1, polyvec::PolyVecK as DPolyVecK, ML_DSA_44};
     let mode = ML_DSA_44;
 
     let mut w1_ref = DPolyVecK::default();

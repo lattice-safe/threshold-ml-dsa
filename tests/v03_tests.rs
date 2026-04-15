@@ -1,11 +1,10 @@
 //! v0.3 integration tests for the paper-faithful ePrint 2026/013 implementation.
 
+use threshold_ml_dsa::fvec::{sample_hyperball, FVec};
 use threshold_ml_dsa::params::*;
 use threshold_ml_dsa::partition;
 use threshold_ml_dsa::rss;
-use threshold_ml_dsa::fvec::{FVec, sample_hyperball};
 use threshold_ml_dsa::sdk::ThresholdMlDsa44Sdk;
-use threshold_ml_dsa::error::Error;
 
 #[test]
 fn test_keygen_from_seed_deterministic() {
@@ -19,8 +18,16 @@ fn test_keygen_from_seed_deterministic() {
 #[test]
 fn test_keygen_all_configs_produce_valid_keys() {
     let configs: &[(u8, u8)] = &[
-        (2, 2), (2, 3), (3, 3), (2, 4), (3, 4), (4, 4),
-        (2, 5), (3, 5), (4, 5), (5, 5),
+        (2, 2),
+        (2, 3),
+        (3, 3),
+        (2, 4),
+        (3, 4),
+        (4, 4),
+        (2, 5),
+        (3, 5),
+        (4, 5),
+        (5, 5),
         // (2, 6) through (6, 6) are slow — test the first few
     ];
 
@@ -35,8 +42,11 @@ fn test_keygen_all_configs_produce_valid_keys() {
         // Each party holds correct subsets
         for sk in &sks {
             for (&mask, _) in &sk.shares {
-                assert!(mask & (1 << sk.id) != 0,
-                    "Party {} has share for subset it doesn't belong to", sk.id);
+                assert!(
+                    mask & (1 << sk.id) != 0,
+                    "Party {} has share for subset it doesn't belong to",
+                    sk.id
+                );
             }
         }
 
@@ -54,9 +64,21 @@ fn test_keygen_all_configs_produce_valid_keys() {
 #[test]
 fn test_partition_all_configs() {
     let configs: &[(u8, u8)] = &[
-        (2, 2), (2, 3), (3, 3), (2, 4), (3, 4), (4, 4),
-        (2, 5), (3, 5), (4, 5), (5, 5),
-        (2, 6), (3, 6), (4, 6), (5, 6), (6, 6),
+        (2, 2),
+        (2, 3),
+        (3, 3),
+        (2, 4),
+        (3, 4),
+        (4, 4),
+        (2, 5),
+        (3, 5),
+        (4, 5),
+        (5, 5),
+        (2, 6),
+        (3, 6),
+        (4, 6),
+        (5, 6),
+        (6, 6),
     ];
 
     for &(t, n) in configs {
@@ -69,15 +91,24 @@ fn test_partition_all_configs() {
         all.sort();
         let before = all.len();
         all.dedup();
-        assert_eq!(before, all.len(), "Duplicate in partition for ({}, {})", t, n);
+        assert_eq!(
+            before,
+            all.len(),
+            "Duplicate in partition for ({}, {})",
+            t,
+            n
+        );
 
         // Each party should only hold subsets it belongs to
         for (i, shares) in p.iter().enumerate() {
             let party = active[i];
             for &mask in shares {
-                assert!(mask & (1 << party) != 0,
+                assert!(
+                    mask & (1 << party) != 0,
                     "Party {} in partition has subset 0b{:b} it doesn't belong to",
-                    party, mask);
+                    party,
+                    mask
+                );
             }
         }
     }
@@ -91,8 +122,11 @@ fn test_hyperball_sampling_norm_bound() {
         sample_hyperball(&mut fv, 252778.0, 3.0, &rhop, nonce);
 
         // The ν-scaled norm should be ≤ radius
-        assert!(!fv.excess(252778.0, 3.0),
-            "Hyperball sample at nonce {} exceeds radius", nonce);
+        assert!(
+            !fv.excess(252778.0, 3.0),
+            "Hyperball sample at nonce {} exceeds radius",
+            nonce
+        );
     }
 }
 
@@ -136,19 +170,14 @@ fn test_end_to_end_threshold_sign_2_2() {
     let msg = b"Hello, threshold ML-DSA!";
     let active = [0u8, 1];
 
-    match sdk.threshold_sign(&active, msg, &mut rng) {
-        Ok(sig) => {
-            assert!(
-                sdk.verify(msg, &sig),
-                "Threshold signature failed FIPS 204 verification"
-            );
-            assert!(!sdk.verify(b"wrong message", &sig));
-        }
-        Err(Error::InsufficientResponses) | Err(Error::InvalidSignature) => {
-            // Fail-closed: no signature is returned when aggregation fails.
-        }
-        Err(e) => panic!("Unexpected threshold_sign error: {e}"),
-    }
+    let sig = sdk
+        .threshold_sign(&active, msg, &mut rng)
+        .expect("2-of-2 threshold_sign should produce a valid signature");
+    assert!(
+        sdk.verify(msg, &sig),
+        "Threshold signature failed FIPS 204 verification"
+    );
+    assert!(!sdk.verify(b"wrong message", &sig));
 }
 
 #[test]
@@ -163,18 +192,13 @@ fn test_end_to_end_threshold_sign_2_3() {
     let msg = b"threshold 2-of-3 test";
     let active = [0u8, 1];
 
-    match sdk.threshold_sign(&active, msg, &mut rng) {
-        Ok(sig) => {
-            assert!(
-                sdk.verify(msg, &sig),
-                "2-of-3 threshold signature failed verification"
-            );
-        }
-        Err(Error::InsufficientResponses) | Err(Error::InvalidSignature) => {
-            // Fail-closed path is acceptable in current implementation state.
-        }
-        Err(e) => panic!("Unexpected threshold_sign error: {e}"),
-    }
+    let sig = sdk
+        .threshold_sign(&active, msg, &mut rng)
+        .expect("2-of-3 threshold_sign should produce a valid signature");
+    assert!(
+        sdk.verify(msg, &sig),
+        "2-of-3 threshold signature failed verification"
+    );
 }
 
 #[test]
@@ -190,18 +214,13 @@ fn test_end_to_end_threshold_sign_4_6() {
     // Pick 4 arbitrary parties out of the 6
     let active = [1u8, 2, 4, 5];
 
-    match sdk.threshold_sign(&active, msg, &mut rng) {
-        Ok(sig) => {
-            assert!(
-                sdk.verify(msg, &sig),
-                "4-of-6 threshold signature failed verification"
-            );
-        }
-        Err(Error::InsufficientResponses) | Err(Error::InvalidSignature) => {
-            // Fail-closed path is acceptable in current implementation state.
-        }
-        Err(e) => panic!("Unexpected threshold_sign error: {e}"),
-    }
+    let sig = sdk
+        .threshold_sign(&active, msg, &mut rng)
+        .expect("4-of-6 threshold_sign should produce a valid signature");
+    assert!(
+        sdk.verify(msg, &sig),
+        "4-of-6 threshold signature failed verification"
+    );
 }
 
 #[test]
@@ -216,16 +235,11 @@ fn test_end_to_end_threshold_sign_5_6() {
     let msg = b"threshold 5-of-6 test with extremely large sub-shares";
     let active = [0u8, 1, 3, 4, 5];
 
-    match sdk.threshold_sign(&active, msg, &mut rng) {
-        Ok(sig) => {
-            assert!(
-                sdk.verify(msg, &sig),
-                "5-of-6 threshold signature failed verification"
-            );
-        }
-        Err(Error::InsufficientResponses) | Err(Error::InvalidSignature) => {
-            // Fail-closed path is acceptable in current implementation state.
-        }
-        Err(e) => panic!("Unexpected threshold_sign error: {e}"),
-    }
+    let sig = sdk
+        .threshold_sign(&active, msg, &mut rng)
+        .expect("5-of-6 threshold_sign should produce a valid signature");
+    assert!(
+        sdk.verify(msg, &sig),
+        "5-of-6 threshold signature failed verification"
+    );
 }

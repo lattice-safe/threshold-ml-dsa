@@ -1,4 +1,4 @@
-//! Ported v0.2 coverage tests that exercise API-independent poly, verify, 
+//! Ported v0.2 coverage tests that exercise API-independent poly, verify,
 //! error, and params primitives.
 //!
 //! These tests were originally in full_coverage_tests.rs (v0.2) and
@@ -228,7 +228,10 @@ fn test_uniform_sampling_different_nonces() {
     let mut a2 = Poly::zero();
     Poly::uniform(&mut a1, &seed, 0);
     Poly::uniform(&mut a2, &seed, 1);
-    assert_ne!(a1.coeffs, a2.coeffs, "different nonces → different polynomials");
+    assert_ne!(
+        a1.coeffs, a2.coeffs,
+        "different nonces → different polynomials"
+    );
 }
 
 #[test]
@@ -248,7 +251,10 @@ fn test_uniform_eta_bounded() {
     Poly::uniform_eta(&mut a, &seed, 0);
     for (i, &c) in a.coeffs.iter().enumerate() {
         let centered = if c > Q / 2 { c - Q } else { c };
-        assert!(centered.abs() <= ETA as i32, "eta sample at {i}: {centered} exceeds ±{ETA}");
+        assert!(
+            centered.abs() <= ETA as i32,
+            "eta sample at {i}: {centered} exceeds ±{ETA}"
+        );
     }
 }
 
@@ -259,7 +265,10 @@ fn test_uniform_gamma1_bounded() {
     Poly::uniform_gamma1(&mut a, &seed, 0);
     for (i, &c) in a.coeffs.iter().enumerate() {
         let centered = if c > Q / 2 { c - Q } else { c };
-        assert!(centered.abs() <= GAMMA1, "gamma1 sample at {i}: {centered} exceeds ±{GAMMA1}");
+        assert!(
+            centered.abs() <= GAMMA1,
+            "gamma1 sample at {i}: {centered} exceeds ±{GAMMA1}"
+        );
     }
 }
 
@@ -270,11 +279,16 @@ fn test_challenge_polynomial_weight() {
     Poly::challenge(&mut c, &seed);
 
     let nonzero: usize = c.coeffs.iter().filter(|&&x| x != 0).count();
-    assert_eq!(nonzero, TAU as usize, "challenge should have τ={TAU} nonzero coefficients");
+    assert_eq!(
+        nonzero, TAU as usize,
+        "challenge should have τ={TAU} nonzero coefficients"
+    );
 
     for &coeff in c.coeffs.iter() {
-        assert!(coeff == 0 || coeff == 1 || coeff == Q - 1,
-            "challenge coeff should be 0, 1, or -1 mod q; got {coeff}");
+        assert!(
+            coeff == 0 || coeff == 1 || coeff == Q - 1,
+            "challenge coeff should be 0, 1, or -1 mod q; got {coeff}"
+        );
     }
 }
 
@@ -333,7 +347,11 @@ fn test_pack_unpack_z_roundtrip() {
 fn test_power2round_reconstruction() {
     for val in [0, 1, 100, 12345, Q / 2, Q - 1] {
         let (a1, a0) = power2round(val);
-        assert_eq!((a1 << D) + a0, val, "Power2Round({val}) failed reconstruction");
+        assert_eq!(
+            (a1 << D) + a0,
+            val,
+            "Power2Round({val}) failed reconstruction"
+        );
     }
 }
 
@@ -342,7 +360,10 @@ fn test_decompose_values() {
     for val in [0, 1, 1000, Q / 3, Q / 2, Q - 1] {
         let (a1, a0) = decompose(val);
         let max_a1 = (Q - 1) / (2 * GAMMA2);
-        assert!(a1 >= 0 && a1 <= max_a1, "a1={a1} out of range for val={val}");
+        assert!(
+            a1 >= 0 && a1 <= max_a1,
+            "a1={a1} out of range for val={val}"
+        );
         assert!(a0.abs() <= GAMMA2, "a0={a0} exceeds γ₂ for val={val}");
     }
 }
@@ -360,7 +381,10 @@ fn test_use_hint_with_hint() {
     let val = 100000;
     let a1_no = use_hint(val, false);
     let a1_yes = use_hint(val, true);
-    assert_ne!(a1_no, a1_yes, "use_hint(true) should differ from use_hint(false)");
+    assert_ne!(
+        a1_no, a1_yes,
+        "use_hint(true) should differ from use_hint(false)"
+    );
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -436,8 +460,10 @@ fn test_matrix_expand_deterministic() {
     let a2 = MatrixA::expand(&rho);
     for i in 0..K {
         for j in 0..L {
-            assert_eq!(a1.rows[i][j].coeffs, a2.rows[i][j].coeffs,
-                "Matrix expansion should be deterministic");
+            assert_eq!(
+                a1.rows[i][j].coeffs, a2.rows[i][j].coeffs,
+                "Matrix expansion should be deterministic"
+            );
         }
     }
 }
@@ -452,7 +478,10 @@ fn test_matrix_mul_vec_zero() {
     let result = a.mul_vec(&v_ntt);
     for k in 0..K {
         for c in 0..N {
-            assert_eq!(result.polys[k].coeffs[c], 0, "A*0 should be 0 at [{k}][{c}]");
+            assert_eq!(
+                result.polys[k].coeffs[c], 0,
+                "A*0 should be 0 at [{k}][{c}]"
+            );
         }
     }
 }
@@ -518,7 +547,10 @@ fn test_standard_sign_verify_roundtrip() {
     let (pk, sk) = verify::keygen(&seed);
     let msg = b"roundtrip verification test";
     let sig = verify::sign_standard(msg, &sk, &[7u8; 32]);
-    assert!(verify::verify(&sig, msg, &pk), "valid signature should verify");
+    assert!(
+        verify::verify(&sig, msg, &pk),
+        "valid signature should verify"
+    );
 }
 
 #[test]
@@ -544,7 +576,10 @@ fn test_verify_corrupted_signature() {
     let (pk, sk) = verify::keygen(&seed);
     let mut sig = verify::sign_standard(b"msg", &sk, &[0u8; 32]);
     sig[10] ^= 0xFF;
-    assert!(!verify::verify(&sig, b"msg", &pk), "corrupted sig should fail");
+    assert!(
+        !verify::verify(&sig, b"msg", &pk),
+        "corrupted sig should fail"
+    );
 }
 
 #[test]
@@ -572,17 +607,27 @@ fn test_sign_deterministic() {
 
 #[test]
 fn test_error_display() {
-    assert_eq!(format!("{}", Error::LocalRejectionAbort),
-        "local hyperball rejection: ‖z_i‖₂² exceeded bound");
+    assert_eq!(
+        format!("{}", Error::LocalRejectionAbort),
+        "local hyperball rejection: ‖z_i‖₂² exceeded bound"
+    );
     assert_eq!(format!("{}", Error::InvalidShare), "invalid RSS share");
-    assert_eq!(format!("{}", Error::InsufficientResponses),
-        "insufficient valid responses from threshold parties");
-    assert_eq!(format!("{}", Error::InvalidSignature),
-        "signature verification failed");
-    assert_eq!(format!("{}", Error::InvalidParameters),
-        "invalid threshold parameters (N, T)");
-    assert_eq!(format!("{}", Error::HintCheckFailed),
-        "low-bits hint check failed");
+    assert_eq!(
+        format!("{}", Error::InsufficientResponses),
+        "insufficient valid responses from threshold parties"
+    );
+    assert_eq!(
+        format!("{}", Error::InvalidSignature),
+        "signature verification failed"
+    );
+    assert_eq!(
+        format!("{}", Error::InvalidParameters),
+        "invalid threshold parameters (N, T)"
+    );
+    assert_eq!(
+        format!("{}", Error::HintCheckFailed),
+        "low-bits hint check failed"
+    );
 }
 
 #[test]
@@ -622,10 +667,14 @@ fn test_params_consistency() {
     assert_eq!(GAMMA2, (Q - 1) / 88);
     assert_eq!(GAMMA1, 1 << 17);
     assert_eq!(PK_BYTES, SEEDBYTES + K * POLYT1_PACKEDBYTES);
-    assert_eq!(SK_BYTES,
-        3 * SEEDBYTES + TRBYTES
-        + L * POLYETA_PACKEDBYTES + K * POLYETA_PACKEDBYTES
-        + K * POLYT0_PACKEDBYTES);
+    assert_eq!(
+        SK_BYTES,
+        3 * SEEDBYTES
+            + TRBYTES
+            + L * POLYETA_PACKEDBYTES
+            + K * POLYETA_PACKEDBYTES
+            + K * POLYT0_PACKEDBYTES
+    );
     assert_eq!(SIG_BYTES, CTILDEBYTES + L * POLYZ_PACKEDBYTES + OMEGA + K);
 }
 

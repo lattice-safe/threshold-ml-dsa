@@ -1,4 +1,4 @@
-use threshold_ml_dsa::fvec::{FVec, sample_hyperball};
+use threshold_ml_dsa::fvec::{sample_hyperball, FVec};
 
 #[test]
 fn test_delta_norm() {

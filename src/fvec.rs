@@ -6,9 +6,12 @@
 
 extern crate alloc;
 
-use crate::params::{K, L, N, Q, FVEC_DIM};
+use crate::params::{FVEC_DIM, K, L, N, Q};
 use crate::poly::{PolyVecK, PolyVecL};
-use sha3::{Shake256, digest::{Update, ExtendableOutput, XofReader}};
+use sha3::{
+    digest::{ExtendableOutput, Update, XofReader},
+    Shake256,
+};
 
 /// A floating-point vector of dimension (K+L)×N.
 ///
@@ -129,13 +132,24 @@ pub fn sample_hyperball(out: &mut FVec, radius: f64, nu: f64, rhop: &[u8; 64], n
     while idx < total_samples {
         // Read two uint64 values
         let u1 = u64::from_le_bytes([
-            buf[idx * 8], buf[idx * 8 + 1], buf[idx * 8 + 2], buf[idx * 8 + 3],
-            buf[idx * 8 + 4], buf[idx * 8 + 5], buf[idx * 8 + 6], buf[idx * 8 + 7],
+            buf[idx * 8],
+            buf[idx * 8 + 1],
+            buf[idx * 8 + 2],
+            buf[idx * 8 + 3],
+            buf[idx * 8 + 4],
+            buf[idx * 8 + 5],
+            buf[idx * 8 + 6],
+            buf[idx * 8 + 7],
         ]);
         let u2 = u64::from_le_bytes([
-            buf[(idx + 1) * 8], buf[(idx + 1) * 8 + 1], buf[(idx + 1) * 8 + 2],
-            buf[(idx + 1) * 8 + 3], buf[(idx + 1) * 8 + 4], buf[(idx + 1) * 8 + 5],
-            buf[(idx + 1) * 8 + 6], buf[(idx + 1) * 8 + 7],
+            buf[(idx + 1) * 8],
+            buf[(idx + 1) * 8 + 1],
+            buf[(idx + 1) * 8 + 2],
+            buf[(idx + 1) * 8 + 3],
+            buf[(idx + 1) * 8 + 4],
+            buf[(idx + 1) * 8 + 5],
+            buf[(idx + 1) * 8 + 6],
+            buf[(idx + 1) * 8 + 7],
         ]);
 
         // Convert to float64 in [0, 1)
@@ -143,25 +157,31 @@ pub fn sample_hyperball(out: &mut FVec, radius: f64, nu: f64, rhop: &[u8; 64], n
         let f2 = (u2 as f64) / ((1u128 << 64) as f64);
 
         // Box-Muller transform
-        let log_val = if f1 < f64::MIN_POSITIVE { f64::MIN_POSITIVE } else { f1 };
+        let log_val = if f1 < f64::MIN_POSITIVE {
+            f64::MIN_POSITIVE
+        } else {
+            f1
+        };
         let r = libm::sqrt(-2.0 * libm::log(log_val));
         let theta = 2.0 * core::f64::consts::PI * f2;
         let z1 = r * libm::cos(theta);
         let z2 = r * libm::sin(theta);
 
-        samples[idx] = z1;
-        sq += z1 * z1;
-
-        samples[idx + 1] = z2;
-        sq += z2 * z2;
-
-        // Apply ν scaling to the first L·N coordinates
+        // Apply ν scaling to the first L·N coordinates, then accumulate norm
+        // in that scaled space so normalization matches the target geometry.
+        let mut s1 = z1;
         if idx < N * L {
-            samples[idx] *= nu;
+            s1 *= nu;
         }
+        samples[idx] = s1;
+        sq += s1 * s1;
+
+        let mut s2 = z2;
         if idx + 1 < N * L {
-            samples[idx + 1] *= nu;
+            s2 *= nu;
         }
+        samples[idx + 1] = s2;
+        sq += s2 * s2;
 
         idx += 2;
     }
@@ -172,7 +192,6 @@ pub fn sample_hyperball(out: &mut FVec, radius: f64, nu: f64, rhop: &[u8; 64], n
         out.coeffs[i] = sample * factor;
     }
 }
-
 
 #[cfg(test)]
 mod tests {
@@ -200,7 +219,8 @@ mod tests {
         let norm = libm::sqrt(sq);
         assert!(
             norm <= 252778.0 * 1.001, // small tolerance for float precision
-            "Hyperball sample norm {} exceeds radius 252778", norm
+            "Hyperball sample norm {} exceeds radius 252778",
+            norm
         );
     }
 
