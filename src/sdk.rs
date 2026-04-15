@@ -175,23 +175,24 @@ impl ThresholdMlDsa44Sdk {
                     Ok(v) => v,
                     Err(_) => continue 'attempt,
                 };
-
-                // Fail-fast: verify each reveal against the sender's round-1 hash
-                // as soon as it arrives.
-                if !sign::verify_round2_reveal(
-                    &sk.tr,
-                    party_id,
-                    act,
-                    msg,
-                    &session_id,
-                    &reveal,
-                    &rd1_hashes[idx],
-                ) {
-                    continue 'attempt;
-                }
                 rd2_reveals.push(reveal);
                 rd2_states.push(st2);
             }
+
+            // Verify all reveals against Round-1 hashes and obtain witness.
+            let active_ids: Vec<u8> = active.to_vec();
+            let verified = match sign::verify_all_round2_reveals(
+                &self.sks[active[0] as usize].tr,
+                &active_ids,
+                act,
+                msg,
+                &session_id,
+                &rd2_reveals,
+                &rd1_hashes,
+            ) {
+                Ok(v) => v,
+                Err(_) => continue 'attempt,
+            };
 
             // ── Aggregate commitments ──
             // Parse each party's reveal into K PolyVecK commitments
@@ -222,7 +223,7 @@ impl ThresholdMlDsa44Sdk {
                 .zip(active.iter().zip(rd2_states.iter()))
             {
                 let sk = &self.sks[party_id as usize];
-                let zs = match sign::round3(sk, &wfinals, st1, st2, &self.params) {
+                let zs = match sign::round3(sk, &wfinals, st1, st2, &self.params, &verified) {
                     Ok(v) => v,
                     Err(_) => continue 'attempt,
                 };

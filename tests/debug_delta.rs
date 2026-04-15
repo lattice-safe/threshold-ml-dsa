@@ -55,6 +55,18 @@ fn trace_one_attempt() {
         rd2_states.push(st2);
     }
 
+    // Verify all reveals and obtain witness for round3
+    let verified = threshold_ml_dsa::sign::verify_all_round2_reveals(
+        sdk.party_key(active[0] as usize).unwrap().tr(),
+        &active,
+        act,
+        msg,
+        &session_id,
+        &rd2_reveals,
+        &rd1_hashes,
+    )
+    .unwrap();
+
     // Aggregate commitments
     let packed_size = threshold_ml_dsa::sign::pack_w_single_size();
     let mut all_reveals = Vec::new();
@@ -85,6 +97,7 @@ fn trace_one_attempt() {
             st1,
             st2,
             sdk.params(),
+            &verified,
         )
         .unwrap();
         all_responses.push(zs);

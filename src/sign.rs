@@ -70,6 +70,58 @@ pub struct StRound2 {
     pub(crate) act: u8,
 }
 
+/// Proof-of-verification witness for Round-2 reveals.
+///
+/// This zero-size type can only be constructed by calling
+/// [`verify_all_round2_reveals`], which checks every peer's reveal
+/// against its Round-1 commitment hash. `round3` requires this
+/// token, making it impossible to compute responses without first
+/// verifying transcript consistency.
+///
+/// This is a type-level enforcement of the transcript-consistency
+/// invariant that was previously only documented.
+pub struct VerifiedReveals {
+    // Private field prevents external construction.
+    _private: (),
+}
+
+/// Verify all Round-2 reveals against their Round-1 commitment hashes.
+///
+/// Returns a [`VerifiedReveals`] witness token on success, which is
+/// required by [`round3`]. This ensures distributed callers cannot
+/// skip per-peer verification.
+///
+/// # Errors
+///
+/// Returns `Error::InvalidShare` if any reveal fails verification.
+pub fn verify_all_round2_reveals(
+    tr: &[u8; TRBYTES],
+    party_ids: &[u8],
+    act: u8,
+    msg: &[u8],
+    session_id: &[u8; 32],
+    reveals: &[Vec<u8>],
+    expected_hashes: &[[u8; 32]],
+) -> Result<VerifiedReveals, Error> {
+    if party_ids.len() != reveals.len() || reveals.len() != expected_hashes.len() {
+        return Err(Error::InvalidParameters);
+    }
+    for (i, reveal) in reveals.iter().enumerate() {
+        if !verify_round2_reveal(
+            tr,
+            party_ids[i],
+            act,
+            msg,
+            session_id,
+            reveal,
+            &expected_hashes[i],
+        ) {
+            return Err(Error::InvalidShare);
+        }
+    }
+    Ok(VerifiedReveals { _private: () })
+}
+
 /// Compute μ = CRH(tr ‖ msg).
 #[must_use] 
 pub fn compute_mu(tr: &[u8; TRBYTES], msg: &[u8]) -> [u8; 64] {
@@ -275,15 +327,16 @@ pub fn verify_round2_reveal(
 /// `wfinals` is an *aggregate* (`Σ w_i`) — it cannot be compared against
 /// individual per-party hashes without re-deriving the aggregation.
 ///
-/// Distributed integrators MUST call [`verify_round2_reveal`] for every
-/// peer's reveal before aggregating, ensuring `wfinals` is derived from
-/// authenticated data. The SDK does this automatically.
+/// Distributed integrators MUST obtain a [`VerifiedReveals`] token by
+/// calling [`verify_all_round2_reveals`] before calling this function.
+/// The SDK does this automatically.
 pub fn round3(
     sk: &ThresholdPrivateKey,
     wfinals: &[PolyVecK], // K aggregated commitment vectors
     st_rd1: StRound1,     // consumed: nonce randomness is single-use
     st_rd2: &StRound2,    // μ and active set from Round 2
     params: &ThresholdParams,
+    _verified: &VerifiedReveals, // proof that all reveals were checked
 ) -> Result<Vec<PolyVecL>, Error> {
     use dilithium::{
         poly::Poly as DPoly,
