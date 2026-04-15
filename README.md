@@ -25,6 +25,9 @@ Standard threshold signature schemes based on Shamir secret sharing introduce la
 | **Hyperball Rejection** | Rényi-divergence-safe L₂ norm rejection via FVec + Box-Muller |
 | **Balanced Partitions** | Algorithm 6 (RSSRecover) for optimal share assignment |
 | **Fresh Keygen** | Independent secrets per subset — no existing key decomposition |
+| **Single-Use Nonces** | Round-3 consumes nonce state by value — prevents replay |
+| **Zeroize-on-Drop** | FVec, StRound1, StRound2, ThresholdPrivateKey all wiped on drop |
+| **Zero Unsafe** | 100% safe Rust (zeroize via `zeroize` crate, not `write_volatile`) |
 | **`#![no_std]`** | Suitable for embedded and TEE environments |
 
 ## Architecture
@@ -163,24 +166,29 @@ cargo test --test v03_tests
 | Partitions | 5 | All 15 configs, balanced coverage, permuted active sets |
 | Hyperball sampling | 2 | Norm bound, excess check |
 | FVec roundtrip | 1 | Poly ↔ FVec centering and reconstruction |
-| SDK | 2 | Creation, invalid parameter rejection |
+| SDK | 3 | Creation, invalid params, duplicate/Sybil rejection |
 | **End-to-end threshold sign** | **6** | **(2,2), (2,3), (3,3), (3,4), (4,6), (5,6): `threshold_sign` + FIPS 204 verify** |
 | Sign unit tests | 5 | pack/unpack roundtrip, bitmask, mu determinism |
-| Coordinator unit tests | 4 | aggregate_commitments, aggregate_responses (zero + additive) |
+| Coordinator unit tests | 6 | aggregate commitments/responses (zero, additive, short-input rejection) |
 | Poly arithmetic | 6 | Add, sub, center, norms, power2round |
 | Params | 4 | Lookup, binomial, num_subsets, rejection |
 | Doctest | 1 | Usage example compilation |
-| **Total** | **40+** | **All passing (`cargo test` runs 70+ including ported coverage suite)** |
+| **Total** | **107** | **All passing — 0 clippy warnings (all + pedantic), clean `no_std`** |
 
 ## Security Notes
 
 - **No key decomposition**: Keys are generated fresh per subset — no existing ML-DSA secret is ever split.
-- **Fail-closed signing**: Returned signatures are verified by the standard FIPS 204 verifier before return; otherwise signing retries and eventually returns `InsufficientResponses`.
-- **Hyperball rejection**: Uses Rényi-divergence-safe float L₂ norms instead of L∞ hypercube rejection.
-- **Timing model note**: Hyperball sampling/rejection uses floating-point (`f64`/`libm`) and is not constant-time on typical hardware.
+- **Fail-closed signing**: Returned signatures are verified by the standard FIPS 204 verifier before return.
+- **Single-use nonce state**: `round3()` takes `StRound1` by value — Rust ownership prevents replay of the same nonce randomness with different coordinator challenges.
+- **Input validation**: `aggregate_commitments`, `aggregate_responses`, and `combine` validate input lengths and return `Result`, preventing panics on malformed vectors.
+- **Sybil / duplicate-ID protection**: The SDK rejects duplicate or unsorted party IDs in the active set.
+- **Zeroize-on-drop**: `FVec`, `StRound1`, `StRound2`, and `ThresholdPrivateKey` all wipe sensitive material on drop via the `zeroize` crate.
+- **Zero unsafe code**: The entire crate is 100% safe Rust.
+- **Hyperball rejection**: Uses Rényi-divergence-safe float L₂ norms; branchless final comparison and branchless Box-Muller clamp.
+- **Timing model note**: Hyperball sampling uses floating-point (`f64`/`libm`) and is not strictly constant-time. Deployments should isolate party execution.
 - **Balanced share assignment**: Algorithm 6 ensures each party receives an equal number of subset secrets.
-- **Memory safe**: Secret material is `zeroize`d on drop.
-- **SDK limitation**: `ThresholdMlDsa44Sdk` is an in-process orchestrator. For production distributed deployments, run parties in isolated processes with authenticated/encrypted transport.
+- **Commitment binding**: Round-1 hashes bind `(tr, id, act, session, μ, w_packed)` to prevent cross-session replay.
+- **SDK limitation**: `ThresholdMlDsa44Sdk` is an in-process orchestrator. For distributed deployments, use the low-level `sign::round*` APIs with per-peer `verify_round2_reveal()` checks and authenticated transport.
 
 ## Dependencies
 
