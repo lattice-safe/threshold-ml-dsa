@@ -27,16 +27,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Sign — any 2 of 3 parties
     let msg = b"Hello, threshold ML-DSA!";
     let active = [0u8, 1]; // parties 0 and 1
-    match sdk.threshold_sign(&active, msg, &mut rng) {
-        Ok(sig) => {
-            // Verify with any standard ML-DSA-44 verifier
-            assert!(sdk.verify(msg, &sig));
-        }
-        // Fail-closed outcomes (no signature returned)
-        Err(threshold_ml_dsa::error::Error::InsufficientResponses)
-        | Err(threshold_ml_dsa::error::Error::InvalidSignature) => {}
-        Err(e) => return Err(Box::new(e)),
-    }
+    let sig = sdk.threshold_sign(&active, msg, &mut rng)?;
+
+    // Verify with any standard ML-DSA-44 verifier
+    assert!(sdk.verify(msg, &sig));
+
     Ok(())
 }
 ```
@@ -65,10 +60,10 @@ Perform a full 3-round threshold signing protocol with K parallel repetitions.
 - `msg: &[u8]` — message to sign
 - `rng: &mut R` — CSPRNG for commitment randomness
 
-**Returns:** `Result<[u8; 2420], Error>`
+**Returns:** `Result<[u8; SIG_BYTES], Error>`
 
 - `Ok(sig)`: FIPS 204-valid signature bytes
-- `Err(Error::InsufficientResponses | Error::InvalidSignature)`: fail-closed abort
+- `Err(Error::InsufficientResponses)`: fail-closed retry budget exhausted
 - other `Err(...)`: configuration/protocol failure
 
 ### `sdk.verify(msg, sig)`
@@ -89,15 +84,16 @@ from_seed(seed, T, N)
        └── pk = Pack(ρ, Power2Round(A·s₁ + s₂))
 
 threshold_sign(active, msg, rng)
-  ├── Round 1: Each party → K hyperball commitments (SampleHyperball)
-  ├── Round 2: Reveal commitments, compute μ = CRH(tr ‖ msg)
+  ├── Build per-attempt session_id = H(tag ‖ entropy ‖ pk ‖ act ‖ msg)
+  ├── Round 1: Each party → K hyperball commitments + hash binding
+  ├── Round 2: Reveal commitments; verify reveal/hash in constant-time
   ├── Round 3: Each party → K responses with FVec.Excess rejection
   │     └── Partial secret recovered via partition::rss_recover()
   ├── Combine: Try each of K slots
   │     ├── ‖z_k‖∞ < γ₁ - β
   │     ├── δ = ‖Az - 2^d·c·t₁ - w‖∞ < γ₂
-  │     └── MakeHint + pack_sig
-  └── Fail-closed: verify(pk, msg, sig) before returning
+  │     └── MakeHint + centered-z pack_sig
+  └── Fail-closed: verify(sig, msg, pk) before returning
 ```
 
 ## Supported Configurations

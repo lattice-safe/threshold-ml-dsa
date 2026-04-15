@@ -65,16 +65,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // 2. Sign with parties 0 and 1 (any 2 of 3)
     let msg = b"Hello, threshold ML-DSA!";
     let active = [0u8, 1];
-    match sdk.threshold_sign(&active, msg, &mut rng) {
-        Ok(sig) => {
-            // 3. Verify with any standard ML-DSA-44 verifier
-            assert!(sdk.verify(msg, &sig));
-        }
-        // Fail-closed outcomes: no signature is returned.
-        Err(threshold_ml_dsa::error::Error::InsufficientResponses)
-        | Err(threshold_ml_dsa::error::Error::InvalidSignature) => {}
-        Err(e) => return Err(Box::new(e)),
-    }
+    let sig = sdk.threshold_sign(&active, msg, &mut rng)?;
+
+    // 3. Verify with any standard ML-DSA-44 verifier
+    assert!(sdk.verify(msg, &sig));
+
     Ok(())
 }
 ```
@@ -85,8 +80,8 @@ The v0.3 protocol follows ePrint 2026/013 exactly:
 
 | Round | Party Action | Coordinator Action |
 |-------|-------------|-------------------|
-| **1 — Commit** | Sample K hyperball vectors via `SampleHyperball(r₁, ν)`, compute K commitments `w_{i,k} = A·r_k + e_k`, broadcast `H(tr ‖ id ‖ w_packed)` | Collect commitment hashes |
-| **2 — Reveal** | Send full K commitment vectors | Verify hashes, aggregate `w_k = Σ w_{i,k}` for each slot k |
+| **1 — Commit** | Sample K hyperball vectors via `SampleHyperball(r₁, ν)`, compute K commitments `w_{i,k} = A·r_k + e_k`, broadcast `H(tag ‖ tr ‖ id ‖ act ‖ session ‖ μ ‖ w_packed)` | Collect commitment hashes |
+| **2 — Reveal** | Send full K commitment vectors | Verify reveal/hash binding, aggregate `w_k = Σ w_{i,k}` for each slot k |
 | **3 — Respond** | Recover partial secret via `RSSRecover(active)`, compute `z_{i,k} = c·s_I + (r_k, e_k)`, apply `FVec.Excess(r, ν)` rejection | Aggregate `z_k = Σ z_{i,k}`, try each k: check `‖z_k‖∞ < γ₁-β`, compute δ, generate hint, pack FIPS 204 signature, verify end-to-end |
 
 ### Key Differences from v0.2
@@ -106,20 +101,20 @@ All 15 (T, N) parameter sets from ePrint 2026/013, Figure 8:
 | (T, N) | K reps | Radius r | Radius r₁ | ν |
 |--------|--------|----------|-----------|---|
 | (2, 2) | 2 | 252,778 | 252,833 | 3 |
-| (2, 3) | 3 | 252,778 | 252,823 | 3 |
-| (3, 3) | 5 | 252,131 | 252,198 | 3 |
-| (2, 4) | 3 | 252,778 | 252,818 | 3 |
-| (3, 4) | 8 | 251,803 | 251,874 | 3 |
-| (4, 4) | 14 | 251,338 | 251,418 | 3 |
-| (2, 5) | 3 | 252,778 | 252,815 | 3 |
-| (3, 5) | 10 | 251,598 | 251,671 | 3 |
-| (4, 5) | 26 | 250,994 | 251,081 | 3 |
-| (5, 5) | 42 | 250,590 | 250,683 | 3 |
-| (2, 6) | 3 | 252,778 | 252,813 | 3 |
-| (3, 6) | 12 | 251,445 | 251,518 | 3 |
-| (4, 6) | 35 | 250,763 | 250,853 | 3 |
-| (5, 6) | 70 | 250,288 | 250,384 | 3 |
-| (6, 6) | 100 | 250,590 | 250,693 | 3 |
+| (2, 3) | 3 | 310,060 | 310,138 | 3 |
+| (3, 3) | 4 | 246,490 | 246,546 | 3 |
+| (2, 4) | 3 | 305,919 | 305,997 | 3 |
+| (3, 4) | 7 | 279,235 | 279,314 | 3 |
+| (4, 4) | 8 | 243,463 | 243,519 | 3 |
+| (2, 5) | 3 | 285,363 | 285,459 | 3 |
+| (3, 5) | 14 | 282,800 | 282,912 | 3 |
+| (4, 5) | 30 | 259,427 | 259,526 | 3 |
+| (5, 5) | 16 | 239,924 | 239,981 | 3 |
+| (2, 6) | 4 | 300,265 | 300,362 | 3 |
+| (3, 6) | 19 | 277,014 | 277,139 | 3 |
+| (4, 6) | 74 | 268,705 | 268,831 | 3 |
+| (5, 6) | 100 | 250,590 | 250,686 | 3 |
+| (6, 6) | 37 | 219,245 | 219,301 | 3 |
 
 ## Modules
 
@@ -153,7 +148,7 @@ All 15 (T, N) parameter sets from ePrint 2026/013, Figure 8:
 ## Testing
 
 ```bash
-# Run all tests (32 tests)
+# Run all tests
 cargo test
 
 # Run end-to-end signing tests
@@ -169,16 +164,16 @@ cargo test --test v03_tests
 | Hyperball sampling | 2 | Norm bound, excess check |
 | FVec roundtrip | 1 | Poly ↔ FVec centering and reconstruction |
 | SDK | 2 | Creation, invalid parameter rejection |
-| **End-to-end threshold sign** | **4** | **(2,2), (2,3), (4,6), (5,6): `Ok(sig)` must verify; fail-closed aborts accepted** |
+| **End-to-end threshold sign** | **4** | **(2,2), (2,3), (4,6), (5,6): `threshold_sign` must return `Ok(sig)` and pass FIPS 204 verification** |
 | Poly arithmetic | 6 | Add, sub, center, norms, power2round |
 | Params | 4 | Lookup, binomial, num_subsets, rejection |
 | Doctest | 1 | Usage example compilation |
-| **Total** | **32** | **All passing** |
+| **Total (table above)** | **29** | **All passing** |
 
 ## Security Notes
 
 - **No key decomposition**: Keys are generated fresh per subset — no existing ML-DSA secret is ever split.
-- **Fail-closed signing**: Returned signatures are verified by the standard FIPS 204 verifier before return; otherwise signing returns an error (`InsufficientResponses`/`InvalidSignature`).
+- **Fail-closed signing**: Returned signatures are verified by the standard FIPS 204 verifier before return; otherwise signing retries and eventually returns `InsufficientResponses`.
 - **Hyperball rejection**: Uses Rényi-divergence-safe float L₂ norms instead of L∞ hypercube rejection.
 - **Balanced share assignment**: Algorithm 6 ensures each party receives an equal number of subset secrets.
 - **Memory safe**: Secret material is `zeroize`d on drop.
@@ -199,7 +194,7 @@ cargo test --test v03_tests
 
 - [FIPS 204 — ML-DSA](https://csrc.nist.gov/pubs/fips/204/final) — Module-Lattice-Based Digital Signature Standard
 - [ePrint 2026/013](https://eprint.iacr.org/2026/013) — Efficient Threshold ML-DSA (Mithril Scheme)
-- [Threshold-ML-DSA (Go)](https://github.com/cloudflare/circl/tree/main/sign/mldsa/threshold) — Reference Go implementation
+- [Threshold-ML-DSA (Go)](https://github.com/Threshold-ML-DSA/Threshold-ML-DSA) — Reference Go implementation
 - [`dilithium-rs`](https://crates.io/crates/dilithium-rs) — Pure-Rust FIPS 204 implementation
 
 ## License

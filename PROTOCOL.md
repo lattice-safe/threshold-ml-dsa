@@ -17,7 +17,7 @@
 4. [Why Threshold Lattice Signing Is Hard](#4-why-threshold-lattice-signing-is-hard)
 5. [Replicated Secret Sharing (RSS)](#5-replicated-secret-sharing-rss)
 6. [Threshold Key Generation](#6-threshold-key-generation)
-7. [Threshold Signing Protocol (4 Rounds)](#7-threshold-signing-protocol-4-rounds)
+7. [Threshold Signing Protocol (3 Rounds)](#7-threshold-signing-protocol-3-rounds)
 8. [Hyperball Rejection Sampling](#8-hyperball-rejection-sampling)
 9. [Signature Aggregation and Encoding](#9-signature-aggregation-and-encoding)
 10. [Verification](#10-verification)
@@ -306,9 +306,12 @@ flowchart TD
 
 ### Step-by-Step
 
-**Step 1 — Derive seed material:**
+**Step 1 — Derive stream material:**
 
-$$(\rho, \text{nonce\_base}) \leftarrow \text{SHAKE-256}(\text{seed})$$
+Use SHAKE-256(seed) as an XOF stream. The implementation reads:
+- `ρ` (matrix seed),
+- one per-party nonce key (`key_i`) for hedged nonces,
+- one 64-byte subset seed per enumerated subset.
 
 **Step 2 — Fresh per-subset secret generation:**
 
@@ -332,7 +335,7 @@ $$\text{Party } i \text{ receives: } \{\mathbf{s}_1^{(S)}, \mathbf{s}_2^{(S)} : 
 
 ---
 
-## 7. Threshold Signing Protocol (3 Rounds + K-Parallel)
+## 7. Threshold Signing Protocol (3 Rounds)
 
 The v0.3 protocol runs in **3 rounds** with **K parallel commitment slots** per round.
 This follows the construction in ePrint 2026/013 exactly.
@@ -357,15 +360,19 @@ $$\mathbf{w}_{i,k} = \mathbf{A} \cdot \mathbf{r}_k + \mathbf{e}_k \in R_q^k$$
 
 **Compute binding hash:**
 
-$$h_i = \text{SHAKE-256}(tr \| i \| \mathbf{w}_{i,0} \| \ldots \| \mathbf{w}_{i,K-1})$$
+`h_i = SHAKE-256("th-ml-dsa-round1-commit-v1" || tr || id || act || session_id || mu || w_{i,0} || ... || w_{i,K-1})`
 
-**Send** $h_i$ to coordinator. **Store** K FVec samples locally.
+**Send** `h_i` to coordinator. **Store** K FVec samples locally.
 
 ### 7.2 Round 2 — Reveal
 
 **Send** all K packed commitment vectors $\mathbf{w}_{i,k}$ to coordinator.
 
-**Compute** $\mu = \text{CRH}(tr \| \text{msg})$.
+**Verify** reveal/hash binding in constant time:
+
+`SHAKE-256("th-ml-dsa-round1-commit-v1" || tr || id || act || session_id || mu || revealed_w_chunks) == h_i`
+
+Mismatches abort the attempt.
 
 ### 7.3 Round 3 — Respond (K Parallel with FVec Rejection)
 
@@ -464,8 +471,8 @@ dramatically improves per-round success probability.
 
 **Step 1 — Validate partials:**
 
-- **ADV-2 (Sybil):** Deduplicate by `party_id` — reject duplicate submissions
-- **ADV-6 (Replay):** Verify each session binding: $\text{SHAKE-256}(\tilde{c} \| i) \stackrel{?}{=} \text{binding}_i$
+- Verify each Round-2 reveal against its Round-1 commitment hash in constant time.
+- Commitment binding includes transcript context: `tr`, `party_id`, `act`, `session_id`, `mu`, and packed commitments.
 
 **Step 2 — Sum:**
 
@@ -473,7 +480,7 @@ $$\mathbf{z} = \sum_{i \in \mathcal{Q}} \mathbf{z}_i = \sum_i (\mathbf{y}_i + c 
 
 Since $\sum_i \mathbf{s}_{1,i} = \mathbf{s}_1$ (RSS reconstruction via signing):
 
-$$\mathbf{z} = \Big(\sum_i \mathbf{y}_i\Big) + c \cdot \mathbf{s}_1$$
+$$\mathbf{z} = \left(\sum_i \mathbf{y}_i\right) + c \cdot \mathbf{s}_1$$
 
 This is **exactly** the standard ML-DSA response with the aggregate masking $\mathbf{y} = \sum_i \mathbf{y}_i$.
 
@@ -496,7 +503,19 @@ $$\mathbf{w}_{\text{approx}} = \mathbf{A} \cdot \mathbf{z} - c \cdot \mathbf{t}_
 > The subtraction is performed **in the NTT domain** with a single INTT at the end, matching the reference verification path exactly.
 > The shift $\mathbf{t}_1 \cdot 2^d$ uses plain `<<=` without modular reduction, matching the reference `polyveck_shiftl`.
 
-The hint bit is set where $\text{HighBits}(\mathbf{w}) \neq \text{HighBits}(\mathbf{w}_{\text{approx}})$. The `use_hint` function in the verifier corrects the discrepancy using the sign of $\text{LowBits}(\mathbf{w}_{\text{approx}})$.
+The coordinator computes:
+
+$$\mathbf{f} = \mathbf{w}_{\text{approx}} - \mathbf{w}, \quad \lVert \mathbf{f} \rVert_\infty < \gamma_2$$
+
+then forms:
+
+$$\mathbf{w}_0' = \mathbf{w}_0 + \mathbf{f}$$
+
+and applies:
+
+$$\mathbf{h} = \text{MakeHint}(\mathbf{w}_0', \mathbf{w}_1)$$
+
+with centered low bits, matching the verifier’s `UseHint` semantics.
 
 ### FIPS 204 Encoding
 
@@ -541,14 +560,11 @@ The implementation defends against the following adversarial capabilities:
 
 | ID | Attack | Defense | Mechanism |
 |----|--------|---------|----------|
-| ADV-1 | Coordinator grinds challenges by selectively including/excluding parties | Commitment binding | 4-round pre-commit/reveal with $H(\mathbf{w}_i \| i)$ |
-| ADV-2 | Corrupt party submits multiple $\mathbf{z}_i$ to bias aggregate | Sybil protection | `seen_ids[MAX_PARTIES]` deduplication |
-| ADV-3 | Coordinator observes individual $\mathbf{z}_i$ | **Inherent** | Mitigated by ADV-4 (no nonce reuse → no key extraction) |
-| ADV-4 | RNG failure (VM snapshot, weak PRNG) → nonce reuse | Hedged nonces | $\text{seed} = H(\text{rng} \| \mathbf{s}_{1,i})$ |
-| ADV-5 | Corrupt party submits garbage $\mathbf{w}_i$ | Binding verification | ADV-1 hash covers full $\mathbf{w}_i$ content |
-| ADV-6 | Stale $\mathbf{z}_i$ replayed across sessions | Session binding | $H(\tilde{c} \| i)$ tag verified by coordinator |
-| ADV-7 | Coordinator leaks acceptance statistics via iteration pattern | Fixed iteration | Always iterates ALL parties unconditionally |
-| ADV-8 | Timing leak in $\mathbf{t}_1 \cdot 2^d \bmod q$ | Barrett reduction | Constant-time `reduce_i32()` |
+| ADV-1 | Commitment equivocation between rounds | Commitment binding | Round-1 hash over `(tr,id,act,session,mu,w_packed)` must match Round-2 reveal |
+| ADV-2 | Replay of stale commitments across sessions/messages | Session binding | Commitment hash includes `session_id` and `mu = CRH(tr || msg)` |
+| ADV-3 | RNG rollback / nonce reuse | Hedged nonces | Round-1 nonce seed binds RNG entropy + key material + transcript context |
+| ADV-4 | Invalid aggregate emitted as success | Fail-closed verification | `combine()` and SDK path verify candidate signatures before returning |
+| ADV-5 | Hint/packing divergence from verifier path | Algebraic alignment | `f = Az - ct1*2^d - w`, centered low bits for `MakeHint`, centered `z` packing |
 
 All constant-time comparisons use `subtle::ConstantTimeEq`. All norm checks (`chknorm`) iterate all coefficients without early exit.
 
@@ -556,246 +572,164 @@ All constant-time comparisons use `subtle::ConstantTimeEq`. All norm checks (`ch
 
 ## 12. Sequence Diagrams
 
-### 11.1 Key Generation and Distribution
+### 12.1 Key Generation and Share Distribution (Figure 4)
 
 ```mermaid
 sequenceDiagram
-    participant D as Trusted Dealer
+    participant D as Dealer
     participant P0 as Party 0
     participant P1 as Party 1
     participant P2 as Party 2
 
-    Note over D: KeyGen
-    D->>D: seed ← random(32)
-    D->>D: (ρ, ρ', K) ← SHAKE-256(seed)
-    D->>D: A ← ExpandA(ρ)
-    D->>D: s₁ ←$ CBD_η, s₂ ←$ CBD_η
-    D->>D: t = A·s₁ + s₂
-    D->>D: pk = (ρ, t₁), sk = (ρ, K, tr, s₁, s₂, t₀)
-
-    Note over D: RSS Distribution (N=3, T=2)
-    D->>D: Enumerate subsets: {0,1}, {0,2}, {1,2}
-    D->>D: s₁⁽⁰¹⁾ ←$ [-η, η]ⁿˡ
-    D->>D: s₁⁽⁰²⁾ ←$ [-η, η]ⁿˡ
-    D->>D: s₁⁽¹²⁾ = s₁ − s₁⁽⁰¹⁾ − s₁⁽⁰²⁾
-
-    D->>P0: {s₁⁽⁰¹⁾, s₁⁽⁰²⁾}, {s₂⁽⁰¹⁾, s₂⁽⁰²⁾}, pk
-    D->>P1: {s₁⁽⁰¹⁾, s₁⁽¹²⁾}, {s₂⁽⁰¹⁾, s₂⁽¹²⁾}, pk
-    D->>P2: {s₁⁽⁰²⁾, s₁⁽¹²⁾}, {s₂⁽⁰²⁾, s₂⁽¹²⁾}, pk
-
-    P0->>P0: s₁₀ = s₁⁽⁰¹⁾ + s₁⁽⁰²⁾
-    P1->>P1: s₁₁ = s₁⁽⁰¹⁾ + s₁⁽¹²⁾
-    P2->>P2: s₁₂ = s₁⁽⁰²⁾ + s₁⁽¹²⁾
-
-    D->>D: Zeroize s₁, s₂, seed
+    Note over D: Input (seed, T, N), subset size M = N-T+1
+    D->>D: Start SHAKE-256(seed) stream
+    D->>D: Read rho and per-party nonce keys
+    D->>D: Enumerate all size-M subsets
+    loop For each subset S
+        D->>D: Sample fresh independent (s1^S, s2^S)
+        D->>P0: Send share if 0 in S
+        D->>P1: Send share if 1 in S
+        D->>P2: Send share if 2 in S
+    end
+    D->>D: s1_total = Σ s1^S, s2_total = Σ s2^S
+    D->>D: pk = Pack(rho, Power2Round(A*s1_total + s2_total).1)
+    D->>D: tr = SHAKE-256(pk)
+    D->>P0: (rho, tr, key0, all shares containing 0)
+    D->>P1: (rho, tr, key1, all shares containing 1)
+    D->>P2: (rho, tr, key2, all shares containing 2)
 ```
 
-### 12.2 Threshold Signing Protocol (4 Rounds — Hardened)
+### 12.2 Threshold Signing Protocol (3 Rounds)
 
 ```mermaid
 sequenceDiagram
     participant P0 as Party 0
     participant P1 as Party 1
-    participant P2 as Party 2
     participant C as Coordinator
 
-    Note over P0,C: ═══ ROUND 0: PRE-COMMIT (ADV-1) ═══
+    Note over P0,C: Round 1 (Commit)
+    P0->>P0: Compute mu = CRH(tr || msg)
+    P1->>P1: Compute mu = CRH(tr || msg)
+    P0->>P0: Sample K hyperball vectors and commitments
+    P1->>P1: Sample K hyperball vectors and commitments
+    P0->>C: h0 = H(tag || tr || id || act || session || mu || wbuf0)
+    P1->>C: h1 = H(tag || tr || id || act || session || mu || wbuf1)
 
-    P0->>P0: seed₀ = H(rng ‖ s₁₀)
-    P0->>P0: y₀ ← ExpandMask(seed₀)
-    P0->>P0: w₀ = INTT(A_hat · NTT(y₀))
-    P0->>P0: h₀ = H(w₀ ‖ 0)
-    P1->>P1: seed₁ = H(rng ‖ s₁₁)
-    P1->>P1: y₁, w₁, h₁
-    P2->>P2: seed₂ = H(rng ‖ s₁₂)
-    P2->>P2: y₂, w₂, h₂
+    Note over P0,C: Round 2 (Reveal)
+    P0->>C: reveal wbuf0
+    P1->>C: reveal wbuf1
+    C->>C: Verify reveal/hash binding (constant-time)
+    C->>C: Aggregate commitments per slot: w_k = Σ_i w_{i,k}
+    C->>P0: Send aggregated w_k
+    C->>P1: Send aggregated w_k
 
-    P0->>C: h₀
-    P1->>C: h₁
-    P2->>C: h₂
+    Note over P0,C: Round 3 (Respond)
+    P0->>P0: Recover partial secret via RSSRecover(active)
+    P1->>P1: Recover partial secret via RSSRecover(active)
+    P0->>P0: For each slot derive c from mu || HighBits(w_k)
+    P1->>P1: Compute z_{i,k}, apply FVec.Excess rejection
+    P0->>C: K responses
+    P1->>C: K responses
 
-    Note over P0,C: ═══ ROUND 1: REVEAL ═══
-
-    P0->>C: w₀
-    P1->>C: w₁
-    P2->>C: w₂
-
-    C->>C: Verify H(w₀‖0) = h₀ ✓
-    C->>C: Verify H(w₁‖1) = h₁ ✓
-    C->>C: Verify H(w₂‖2) = h₂ ✓
-
-    Note over P0,C: ═══ ROUND 2: CHALLENGE ═══
-
-    C->>C: w = w₀ + w₁ + w₂
-    C->>C: μ = H(tr ‖ msg)
-    C->>C: c̃ = H(μ ‖ pack_w1(HighBits(w)))
-
-    C->>P0: c̃
-    C->>P1: c̃
-    C->>P2: c̃
-
-    Note over P0,C: ═══ ROUND 3: SIGN (ADV-6) ═══
-
-    P0->>P0: z₀ = c · s₁₀ + y₀, check ‖z₀‖₂² ≤ B²
-    P0->>P0: binding₀ = H(c̃ ‖ 0)
-    P1->>P1: z₁ = c · s₁₁ + y₁, check ‖z₁‖₂² ≤ B²
-    P1->>P1: binding₁ = H(c̃ ‖ 1)
-    P2->>P2: z₂ = c · s₁₂ + y₂, check ‖z₂‖₂² ≤ B²
-    P2->>P2: binding₂ = H(c̃ ‖ 2)
-
-    P0->>C: (z₀, binding₀) ✓
-    P1->>C: (z₁, binding₁) ✓
-    P2->>C: (z₂, binding₂) ✓
-
-    Note over P0,C: ═══ AGGREGATION ═══
-
-    C->>C: Dedup party_ids (ADV-2)
-    C->>C: Verify all bindings (ADV-6)
-    C->>C: z = z₀ + z₁ + z₂ (centered form)
-    C->>C: Check ‖z‖∞ < γ₁ − β (constant-time)
-    C->>C: w_approx = Az - c·t₁·2ᵈ (single-INTT)
-    C->>C: h = hint where HighBits(w) ≠ HighBits(w_approx)
-    C->>C: σ = (c̃, pack_z(z), pack_h(h))
-    C-->>C: Output σ
+    C->>C: Aggregate z_k and run Combine checks
+    C->>C: Pack candidate signature and verify(sig,msg,pk)
 ```
 
-### 11.3 Signing with Rejection and Retry
+### 12.3 Signing with Rejection and Retry
 
 ```mermaid
 sequenceDiagram
     participant P0 as Party 0
     participant P1 as Party 1
-    participant P2 as Party 2
     participant C as Coordinator
 
-    Note over P0,C: Attempt 1
+    Note over P0,C: Attempt a
+    P0->>C: Round1 hash, Round2 reveal, Round3 responses
+    P1->>C: Round1 hash, Round2 reveal, Round3 responses
+    C->>C: Combine fails (norm, delta, hint, or verify gate)
+    C->>C: Start attempt a+1 with fresh session id
 
-    P0->>C: w₀
-    P1->>C: w₁
-    P2->>C: w₂
-    C->>P0: c̃
-    C->>P1: c̃
-    C->>P2: c̃
-
-    P0->>P0: z₀: ‖z₀‖₂² > B² → REJECT
-    P1->>C: z₁ ✓
-    P2->>C: z₂ ✓
-
-    C->>C: Only 2/3 passed (≥ T=2) → aggregate
-    C->>C: z = z₁ + z₂
-    C->>C: ‖z‖∞ ≥ γ₁−β → FAIL
-
-    Note over P0,C: Attempt 2 (full retry)
-
-    P0->>C: w₀'
-    P1->>C: w₁'
-    P2->>C: w₂'
-    C->>P0: c̃'
-    C->>P1: c̃'
-    C->>P2: c̃'
-
-    P0->>C: z₀' ✓
-    P1->>C: z₁' ✓
-    P2->>C: z₂' ✓
-
-    C->>C: z = z₀' + z₁' + z₂'
-    C->>C: ‖z‖∞ < γ₁−β → ✓
-    C-->>C: σ = (c̃', z, h)
+    Note over P0,C: Attempt a+1
+    P0->>C: Fresh commitments and responses
+    P1->>C: Fresh commitments and responses
+    C->>C: Combine succeeds for one slot k
+    C-->>C: Return FIPS-204-verifiable signature
 ```
 
 ---
 
-## 12. Activity Diagrams
+## 13. Activity Diagrams
 
-### 12.1 Overall Protocol Flow
+### 13.1 Overall Protocol Flow
 
 ```mermaid
 flowchart TD
-    START([Start]) --> KG[Key Generation]
-    KG --> RSS[RSS Distribution to N parties]
-    RSS --> INIT[Parties compute effective shares]
+    START([Start]) --> INIT["Select active set A (|A| = T)"]
+    INIT --> TRY["New attempt: fresh session id"]
 
-    INIT --> R1["ROUND 1: All parties sample yᵢ, compute wᵢ"]
-    R1 --> AGG_W["Coordinator: w = Σ wᵢ"]
-    AGG_W --> CHAL["Coordinator: c̃ = H(tr ‖ w₁ ‖ msg)"]
-    CHAL --> BCAST["Broadcast c̃ to all parties"]
+    TRY --> R1["Round 1: each party sends commitment hash"]
+    R1 --> R2["Round 2: each party reveals commitments"]
+    R2 --> BIND{"All reveal/hash checks pass?"}
+    BIND -->|No| RETRY{"Retries left?"}
+    BIND -->|Yes| AGG_W["Aggregate commitments per slot w_k"]
 
-    BCAST --> R3["ROUND 3: Each party computes zᵢ = c·s₁ᵢ + yᵢ"]
-    R3 --> REJ{"Each party:\n‖zᵢ‖₂² ≤ B²?"}
-    REJ -->|Accept| SEND["Send zᵢ to coordinator"]
-    REJ -->|Reject| ABORT["Party aborts locally"]
+    AGG_W --> R3["Round 3: each party computes K responses z_{i,k}"]
+    R3 --> AGG_Z["Aggregate responses per slot z_k"]
+    AGG_Z --> COMB["Combine slot checks (norm, delta, hint, pack)"]
+    COMB --> VERIFY{"verify(sig, msg, pk) == true?"}
 
-    SEND --> COUNT{"Coordinator:\n≥ T responses?"}
-    ABORT --> COUNT
-    COUNT -->|No| RETRY{"Retries left?"}
-    RETRY -->|Yes| R1
-    RETRY -->|No| FAIL([Protocol Failed])
-
-    COUNT -->|Yes| AGG_Z["Coordinator: z = Σ zᵢ"]
-    AGG_Z --> NORM{"‖z‖∞ < γ₁ − β?"}
-    NORM -->|No| RETRY
-    NORM -->|Yes| ENCODE["Compute h = MakeHint(...)<br>Encode σ = (c̃, z, h)"]
-    ENCODE --> VERIFY["Verify via FIPS 204"]
-    VERIFY --> DONE([Valid Signature σ])
+    VERIFY -->|Yes| DONE([Return signature])
+    VERIFY -->|No| RETRY
+    RETRY -->|Yes| TRY
+    RETRY -->|No| FAIL([Err InsufficientResponses])
 
     style START fill:#339af0,color:#fff
     style DONE fill:#51cf66,color:#fff
     style FAIL fill:#ff6b6b,color:#fff
-    style REJ fill:#ffa94d,color:#000
-    style NORM fill:#ffa94d,color:#000
 ```
 
-### 12.2 Per-Party Sign Operation (Round 3)
+### 13.2 Per-Party Round 3 Computation
 
 ```mermaid
 flowchart TD
-    START([Receive c̃]) --> DECODE["c = SampleInBall(c̃)"]
-    DECODE --> NTT_C["ĉ = NTT(c)"]
-    NTT_C --> NTT_S["ŝ₁ᵢ = NTT(s₁ᵢ)"]
-
-    NTT_S --> LOOP["For j = 0 to ℓ−1:"]
-    LOOP --> PW["cs₁ⱼ = INTT(ĉ ⊙ ŝ₁ᵢⱼ)"]
-    PW --> RED1["reduce(cs₁ⱼ), caddq(cs₁ⱼ)"]
-    RED1 --> ADD["zⱼ = cs₁ⱼ + yⱼ"]
-    ADD --> RED2["reduce(zⱼ)"]
-    RED2 --> NEXT{j < ℓ−1?}
+    START([Input: w_k, mu, active, round1 state]) --> PART["partition = RSSRecover(active, N, T)"]
+    PART --> REC["Recover (s1_I, s2_I) for this party"]
+    REC --> LOOP["For each slot k"]
+    LOOP --> CHAL["c_k = SampleInBall(H(mu || HighBits(w_k)))"]
+    CHAL --> RESP["z_f = (c_k*s1_I, c_k*s2_I) + fvec_k"]
+    RESP --> EXC{"FVec.Excess(z_f, r, nu)?"}
+    EXC -->|Yes| ZERO["Emit zero response for slot k"]
+    EXC -->|No| ROUND["Round z_f back to polynomial vectors"]
+    ZERO --> NEXT{More slots?}
+    ROUND --> NEXT
     NEXT -->|Yes| LOOP
-    NEXT -->|No| NORM
-
-    NORM["Compute ‖z‖₂² = Σⱼ Σₘ center(zⱼₘ)²"]
-    NORM --> CHECK{"‖z‖₂² ≤ B²?"}
-    CHECK -->|Yes| ACCEPT(["Return zᵢ ✓"])
-    CHECK -->|No| REJECT(["Return LocalRejectionAbort ✗"])
+    NEXT -->|No| OUT([Return K responses])
 
     style START fill:#339af0,color:#fff
-    style ACCEPT fill:#51cf66,color:#fff
-    style REJECT fill:#ff6b6b,color:#fff
-    style CHECK fill:#ffa94d,color:#000
+    style OUT fill:#51cf66,color:#fff
 ```
 
-### 12.3 RSS Key Distribution
+### 13.3 Coordinator Combine (Per Slot)
 
 ```mermaid
 flowchart TD
-    START([Input: s₁, s₂, N, T]) --> VALIDATE{"N ≤ 6?\nT ≤ N?\nT ≥ 2?"}
-    VALIDATE -->|No| ERROR([InvalidParameters])
-    VALIDATE -->|Yes| ENUM["Enumerate all C(N,N−T+1) subsets"]
-
-    ENUM --> LOOP["For each subset S (except last):"]
-    LOOP --> SAMPLE["Sample s₁⁽ˢ⁾ ←$ [-η, η]ⁿˡ"]
-    SAMPLE --> SUM["sum += s₁⁽ˢ⁾"]
-    SUM --> NEXT{More subsets?}
-    NEXT -->|Yes| LOOP
-    NEXT -->|No| LAST
-
-    LAST["s₁⁽ˡᵃˢᵗ⁾ = s₁ − sum"] --> DIST["Distribute to parties"]
-    DIST --> PARTY["Party i receives all s⁽ˢ⁾ where i ∈ S"]
-    PARTY --> EFF["Party has local holding s₁,holdᵢ = Σ_{S∋i} s₁⁽ˢ⁾"]
-    EFF --> DONE([Party Key Shares Ready])
+    START([Input: w_k, z_k, pk, msg]) --> NZ{"z_k nonzero and chknorm < gamma1-beta?"}
+    NZ -->|No| REJ([Reject slot])
+    NZ -->|Yes| CT["c_tilde = H(mu || HighBits(w_k))"]
+    CT --> WA["w_approx = A*z_k - c*t1*2^d"]
+    WA --> DELTA{"|w_approx - w_k|_inf < gamma2?"}
+    DELTA -->|No| REJ
+    DELTA -->|Yes| HINT["h = MakeHint(w0 + f, w1)"]
+    HINT --> OMEGA{"hint popcount <= omega?"}
+    OMEGA -->|No| REJ
+    OMEGA -->|Yes| PACK["Pack (c_tilde || z || h)"]
+    PACK --> VER{"verify(sig, msg, pk)?"}
+    VER -->|Yes| OK([Accept slot and return sig])
+    VER -->|No| REJ
 
     style START fill:#339af0,color:#fff
-    style DONE fill:#51cf66,color:#fff
-    style ERROR fill:#ff6b6b,color:#fff
+    style OK fill:#51cf66,color:#fff
+    style REJ fill:#ff6b6b,color:#fff
 ```
 
 ---
@@ -818,18 +752,18 @@ The threshold scheme inherits the _Module-LWE/Module-SIS_ hardness assumptions f
 ### Privacy
 
 - Share pieces are $\eta$-bounded random values — statistically independent of the secret
-- The last share (computed as $\mathbf{s} - \sum \text{random}$) has larger but still bounded magnitude
+- Subset shares are generated independently from SHAKE-derived seeds (no remainder-share decomposition)
 - Sensitive material ($\mathbf{s}_{1,i}$, $\mathbf{y}_i$, seed) is zeroized on drop via `zeroize`
 - Challenge and session binding comparisons use constant-time equality (`subtle::ConstantTimeEq`)
 - All norm checks (`chknorm`) iterate all coefficients/polynomials without early exit
 
 ### Adversarial Resilience
 
-- **Malicious coordinator** cannot grind challenges (commitment binding, ADV-1)
-- **Malicious party** cannot bias the aggregate signature (deduplication, ADV-2)
-- **RNG failure** cannot cause nonce reuse across parties (hedged derivation, ADV-4)
-- **Replay attacks** are detected via session binding (ADV-6)
-- **Timing attacks** are mitigated by constant-time norms, comparisons, and fixed iteration (ALG-4, ADV-7)
+- **Malicious coordinator** cannot alter revealed commitments after Round 1 (ADV-1)
+- **Replay across sessions/messages** is detected by transcript-bound commitment hashes (ADV-2)
+- **RNG failure** is hedged via transcript-bound nonce derivation (ADV-3)
+- **Invalid aggregates** are blocked by fail-closed end-to-end verification (ADV-4)
+- **Timing attacks** are mitigated by constant-time checks in critical comparisons and norm paths
 
 ### Liveness
 
@@ -859,10 +793,10 @@ The crate exposes a high-level SDK module: `threshold_ml_dsa::sdk`.
   - Produces `ThresholdPrivateKey` for each party
 - `ThresholdMlDsa44Sdk::threshold_sign(active, msg, rng)`
   - Round 1: `sign::round1()` — K hyperball commitments per party
-  - Round 2: `sign::round2()` — reveal + μ computation
+  - Round 2: `sign::round2()` + `sign::verify_round2_reveal()` — reveal and binding checks
   - Round 3: `sign::round3()` — K responses with FVec rejection
   - Combine: `coordinator::combine()` — K-parallel aggregation
-  - Verify: `verify::verify()` — fail-closed FIPS 204 check
+  - Verify: `verify::verify(sig, msg, pk)` — fail-closed FIPS 204 check
 - `ThresholdMlDsa44Sdk::verify(...)`
   - Calls `verify::verify` (standard FIPS 204 verifier path)
 
@@ -878,5 +812,5 @@ be transported with authenticated encryption and replay protection.
 >
 > - NIST FIPS 204 — _Module-Lattice-Based Digital Signature Standard_ (2024)
 > - ePrint 2026/013 — _Efficient Threshold ML-DSA via Replicated Secret Sharing_
-> - [Threshold-ML-DSA (Go)](https://github.com/cloudflare/circl/tree/main/sign/mldsa/threshold) — Reference Go implementation
+> - [Threshold-ML-DSA (Go)](https://github.com/Threshold-ML-DSA/Threshold-ML-DSA) — Reference Go implementation
 > - [`dilithium-rs`](https://crates.io/crates/dilithium-rs) — Pure-Rust FIPS 204 implementation
