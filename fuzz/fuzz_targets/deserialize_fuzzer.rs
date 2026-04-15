@@ -1,59 +1,87 @@
 #![no_main]
 
 use libfuzzer_sys::fuzz_target;
-use threshold_ml_dsa::coordinator::aggregate_responses;
-use threshold_ml_dsa::sign::PartialSignature;
-use threshold_ml_dsa::poly::{PolyVecL, PolyVecK};
+use threshold_ml_dsa::coordinator;
 use threshold_ml_dsa::params::*;
+use threshold_ml_dsa::poly::{PolyVecK, PolyVecL};
+use threshold_ml_dsa::sign;
 
-fuzz_target!(|data: &[u8]| {
-    // We need enough data to populate w, c_tilde, pk, and at least some partials
-    let min_len = POLYK_SIZE + CTILDEBYTES + PK_BYTES + POLYL_SIZE;
-    if data.len() < min_len {
-        return;
+fn next_byte(data: &[u8], idx: &mut usize) -> u8 {
+    if data.is_empty() {
+        return 0;
     }
+    let b = data[*idx % data.len()];
+    *idx += 1;
+    b
+}
 
-    let mut offset = 0;
-    
-    // We mock the structures with the raw fuzzer inputs
-    let mut w = PolyVecK::zero();
-    let mut z = PolyVecL::zero();
-    
-    // Fuzz dummy w
+fn next_i32(data: &[u8], idx: &mut usize) -> i32 {
+    let bytes = [
+        next_byte(data, idx),
+        next_byte(data, idx),
+        next_byte(data, idx),
+        next_byte(data, idx),
+    ];
+    i32::from_le_bytes(bytes)
+}
+
+fn fill_polyveck(data: &[u8], idx: &mut usize) -> PolyVecK {
+    let mut out = PolyVecK::zero();
     for i in 0..K {
         for j in 0..N {
-            w.polys[i].coeffs[j] = (data[offset % data.len()] as i32) * 1000;
-            offset += 1;
+            out.polys[i].coeffs[j] = next_i32(data, idx);
         }
     }
+    out
+}
 
-    let mut c_tilde = vec![0u8; CTILDEBYTES];
-    c_tilde.copy_from_slice(&data[offset..offset+CTILDEBYTES]);
-    offset += CTILDEBYTES;
+fn fill_polyvecl(data: &[u8], idx: &mut usize) -> PolyVecL {
+    let mut out = PolyVecL::zero();
+    for i in 0..L {
+        for j in 0..N {
+            out.polys[i].coeffs[j] = next_i32(data, idx);
+        }
+    }
+    out
+}
 
-    let mut pk = vec![0u8; PK_BYTES];
-    if offset + PK_BYTES <= data.len() {
-        pk.copy_from_slice(&data[offset..offset+PK_BYTES]);
-        offset += PK_BYTES;
-    } else {
+fuzz_target!(|data: &[u8]| {
+    if data.is_empty() {
         return;
     }
 
-    // Generate valid length PartialSignatures with raw z garbage
-    for i in 0..L {
-        for j in 0..N {
-            z.polys[i].coeffs[j] = (data[offset % data.len()] as i32) * 100_000;
-            offset += 1;
-        }
+    let mut idx = 0usize;
+
+    // 1) Exercise pack/unpack robustness.
+    let w = fill_polyveck(data, &mut idx);
+    let packed = sign::pack_w_single(&w);
+    let _ = sign::unpack_w_single(&packed);
+
+    // Also try unpacking arbitrary-length attacker input directly.
+    let _ = sign::unpack_w_single(data);
+
+    // 2) Exercise combine() with adversarial commitments/responses.
+    // Use a small config for speed while still hitting the full code path.
+    let params = match get_threshold_params(2, 2) {
+        Some(p) => p,
+        None => return,
+    };
+    let k_reps = params.k_reps as usize;
+
+    let mut pk = [0u8; PK_BYTES];
+    for b in &mut pk {
+        *b = next_byte(data, &mut idx);
     }
-    
-    let partials = vec![PartialSignature { party_id: 1, z }];
 
-    // Run the aggregation core (which unpacks PK and evaluates MakeHint bounds)
-    // The goal here is that it MUST NOT panic. It should just gracefully Err(InvalidSignature).
-    let _ = aggregate_responses(&partials, &w, &c_tilde, 1, &pk);
+    let mut wfinals = Vec::with_capacity(k_reps);
+    let mut zfinals = Vec::with_capacity(k_reps);
+    for _ in 0..k_reps {
+        wfinals.push(fill_polyveck(data, &mut idx));
+    }
+    for _ in 0..k_reps {
+        zfinals.push(fill_polyvecl(data, &mut idx));
+    }
+
+    let msg = if idx < data.len() { &data[idx..] } else { b"" };
+    let _ = coordinator::combine(&pk, msg, &wfinals, &zfinals, &params);
 });
-
-// Size helpers since poly structure isn't direct
-const POLYK_SIZE: usize = K * N;
-const POLYL_SIZE: usize = L * N;

@@ -45,7 +45,7 @@ impl ThresholdMlDsa44Sdk {
             return Err(Error::InvalidParameters);
         }
 
-        let (pk, sks) = rss::keygen_from_seed(seed, &params);
+        let (pk, sks) = rss::keygen_from_seed(seed, &params)?;
 
         Ok(Self {
             pk,
@@ -80,10 +80,21 @@ impl ThresholdMlDsa44Sdk {
         let t = self.params.t as usize;
         let k_reps = self.params.k_reps as usize;
 
-        // Build active bitmask
+        // Validate and build active bitmask.
         let mut act: u8 = 0;
+        let mut prev: Option<u8> = None;
         for &id in active {
+            if id >= self.params.n {
+                return Err(Error::InvalidParameters);
+            }
+            if let Some(p) = prev {
+                // Enforce strict ordering to reject duplicates and ambiguous sets.
+                if id <= p {
+                    return Err(Error::InvalidParameters);
+                }
+            }
             act |= 1 << id;
+            prev = Some(id);
         }
 
         'attempt: for _attempt in 0..self.max_retries {
@@ -131,24 +142,22 @@ impl ThresholdMlDsa44Sdk {
                     Ok(v) => v,
                     Err(_) => continue 'attempt,
                 };
-                rd2_reveals.push(reveal);
-                rd2_states.push(st2);
-            }
 
-            // Verify each reveal against its Round 1 commitment hash.
-            for (idx, &party_id) in active.iter().enumerate() {
-                let tr = &self.sks[party_id as usize].tr;
+                // Fail-fast: verify each reveal against the sender's round-1 hash
+                // as soon as it arrives.
                 if !sign::verify_round2_reveal(
-                    tr,
+                    &sk.tr,
                     party_id,
                     act,
                     msg,
                     &session_id,
-                    &rd2_reveals[idx],
+                    &reveal,
                     &rd1_hashes[idx],
                 ) {
                     continue 'attempt;
                 }
+                rd2_reveals.push(reveal);
+                rd2_states.push(st2);
             }
 
             // ── Aggregate commitments ──
@@ -173,13 +182,16 @@ impl ThresholdMlDsa44Sdk {
             let mut all_responses: Vec<Vec<PolyVecL>> = Vec::with_capacity(t);
             for (idx, &party_id) in active.iter().enumerate() {
                 let sk = &self.sks[party_id as usize];
-                let zs = sign::round3(
+                let zs = match sign::round3(
                     sk,
                     &wfinals,
                     &rd1_states[idx],
                     &rd2_states[idx],
                     &self.params,
-                );
+                ) {
+                    Ok(v) => v,
+                    Err(_) => continue 'attempt,
+                };
                 all_responses.push(zs);
             }
 
@@ -232,5 +244,29 @@ mod tests {
         assert!(ThresholdMlDsa44Sdk::from_seed(&seed, 2, 7, 10).is_err());
         // max_retries = 0
         assert!(ThresholdMlDsa44Sdk::from_seed(&seed, 2, 2, 0).is_err());
+    }
+
+    #[test]
+    fn test_threshold_sign_rejects_duplicate_or_unsorted_active_set() {
+        use rand::rngs::StdRng;
+        use rand::SeedableRng;
+
+        let seed = [99u8; 32];
+        let sdk = ThresholdMlDsa44Sdk::from_seed(&seed, 2, 3, 2).unwrap();
+        let mut rng = StdRng::seed_from_u64(1);
+        let msg = b"active set validation";
+
+        assert_eq!(
+            sdk.threshold_sign(&[0, 0], msg, &mut rng),
+            Err(Error::InvalidParameters)
+        );
+        assert_eq!(
+            sdk.threshold_sign(&[2, 1], msg, &mut rng),
+            Err(Error::InvalidParameters)
+        );
+        assert_eq!(
+            sdk.threshold_sign(&[0, 3], msg, &mut rng),
+            Err(Error::InvalidParameters)
+        );
     }
 }

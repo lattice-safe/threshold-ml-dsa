@@ -82,7 +82,8 @@ fn trace_one_attempt() {
             &rd1_states[idx],
             &rd2_states[idx],
             &sdk.params,
-        );
+        )
+        .unwrap();
         all_responses.push(zs);
     }
 

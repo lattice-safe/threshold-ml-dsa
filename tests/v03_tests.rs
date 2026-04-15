@@ -10,8 +10,8 @@ use threshold_ml_dsa::sdk::ThresholdMlDsa44Sdk;
 fn test_keygen_from_seed_deterministic() {
     let seed = [42u8; 32];
     let params = get_threshold_params(2, 3).unwrap();
-    let (pk1, _) = rss::keygen_from_seed(&seed, &params);
-    let (pk2, _) = rss::keygen_from_seed(&seed, &params);
+    let (pk1, _) = rss::keygen_from_seed(&seed, &params).unwrap();
+    let (pk2, _) = rss::keygen_from_seed(&seed, &params).unwrap();
     assert_eq!(pk1, pk2, "Keygen should be deterministic");
 }
 
@@ -34,7 +34,7 @@ fn test_keygen_all_configs_produce_valid_keys() {
     for &(t, n) in configs {
         let seed = [t.wrapping_add(n); 32];
         let params = get_threshold_params(t, n).unwrap();
-        let (pk, sks) = rss::keygen_from_seed(&seed, &params);
+        let (pk, sks) = rss::keygen_from_seed(&seed, &params).unwrap();
 
         // N private keys
         assert_eq!(sks.len(), n as usize, "Wrong key count for ({}, {})", t, n);
@@ -83,7 +83,7 @@ fn test_partition_all_configs() {
 
     for &(t, n) in configs {
         let active: Vec<u8> = (0..t).collect();
-        let p = partition::rss_recover(&active, n, t);
+        let p = partition::rss_recover(&active, n, t).unwrap();
         assert_eq!(p.len(), t as usize, "partition size for ({}, {})", t, n);
 
         // All subsets should be covered exactly once

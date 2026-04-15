@@ -10,6 +10,8 @@
 //! implementation.
 
 extern crate alloc;
+use crate::error::Error;
+use crate::params::MAX_PARTIES;
 use alloc::vec::Vec;
 
 /// Compute the balanced partition of shares for the given active signer set.
@@ -22,10 +24,24 @@ use alloc::vec::Vec;
 /// * `n` — total number of parties N
 /// * `t` — threshold T (number of active signers = `active.len()`)
 ///
-/// # Panics
-/// Panics if `active.len() != t` or `(t, n)` is unsupported.
-pub fn rss_recover(active: &[u8], n: u8, t: u8) -> Vec<Vec<u8>> {
-    debug_assert_eq!(active.len(), t as usize);
+/// Returns `Error::InvalidParameters` if the active set or `(t, n)` is invalid.
+pub fn rss_recover(active: &[u8], n: u8, t: u8) -> Result<Vec<Vec<u8>>, Error> {
+    if active.len() != t as usize || t < 2 || t > n || (n as usize) > MAX_PARTIES {
+        return Err(Error::InvalidParameters);
+    }
+    let mut prev: Option<u8> = None;
+    for &id in active {
+        if id >= n {
+            return Err(Error::InvalidParameters);
+        }
+        if let Some(p) = prev {
+            // Require sorted, duplicate-free signer sets.
+            if id <= p {
+                return Err(Error::InvalidParameters);
+            }
+        }
+        prev = Some(id);
+    }
 
     // Base case: T == N → each party has exactly one share (its own singleton)
     if t == n {
@@ -35,7 +51,7 @@ pub fn rss_recover(active: &[u8], n: u8, t: u8) -> Vec<Vec<u8>> {
             // subset is a single party bitmask
             result.push(alloc::vec![1u8 << party]);
         }
-        return result;
+        return Ok(result);
     }
 
     // Hardcoded optimal partitions for canonical active set {0, 1, ..., T-1}
@@ -95,7 +111,7 @@ pub fn rss_recover(active: &[u8], n: u8, t: u8) -> Vec<Vec<u8>> {
             alloc::vec![9, 24, 40],  // {0,3}, {3,4}, {3,5}
             alloc::vec![48, 17, 18], // {4,5}, {0,4}, {1,4}
         ],
-        _ => panic!("Unsupported (T={}, N={}) — must be 2 ≤ T ≤ N ≤ 6", t, n),
+        _ => return Err(Error::InvalidParameters),
     };
 
     // Build the permutation φ: canonical party index → actual party ID
@@ -130,7 +146,7 @@ pub fn rss_recover(active: &[u8], n: u8, t: u8) -> Vec<Vec<u8>> {
         result.push(translated);
     }
 
-    result
+    Ok(result)
 }
 
 #[cfg(test)]
@@ -174,7 +190,7 @@ mod tests {
     #[test]
     fn test_partition_3_2() {
         let active = [0, 1];
-        let p = rss_recover(&active, 3, 2);
+        let p = rss_recover(&active, 3, 2).unwrap();
         assert_eq!(p.len(), 2);
         verify_partition_covers_all(&p, 3, 2);
         verify_party_membership(&active, &p);
@@ -183,7 +199,7 @@ mod tests {
     #[test]
     fn test_partition_4_3() {
         let active = [0, 1, 2];
-        let p = rss_recover(&active, 4, 3);
+        let p = rss_recover(&active, 4, 3).unwrap();
         assert_eq!(p.len(), 3);
         verify_partition_covers_all(&p, 4, 3);
         verify_party_membership(&active, &p);
@@ -193,7 +209,7 @@ mod tests {
     fn test_partition_permuted_active_set() {
         // Use a non-canonical active set {1, 3, 4} for (T=3, N=5)
         let active = [1, 3, 4];
-        let p = rss_recover(&active, 5, 3);
+        let p = rss_recover(&active, 5, 3).unwrap();
         assert_eq!(p.len(), 3);
         verify_partition_covers_all(&p, 5, 3);
         verify_party_membership(&active, &p);
@@ -202,7 +218,7 @@ mod tests {
     #[test]
     fn test_partition_6_6_base_case() {
         let active = [0, 1, 2, 3, 4, 5];
-        let p = rss_recover(&active, 6, 6);
+        let p = rss_recover(&active, 6, 6).unwrap();
         assert_eq!(p.len(), 6);
         // T == N: each party gets exactly one singleton subset
         for (i, shares) in p.iter().enumerate() {
@@ -233,7 +249,7 @@ mod tests {
         for &(t, n) in configs {
             // Use canonical active set {0, 1, ..., T-1}
             let active: Vec<u8> = (0..t).collect();
-            let p = rss_recover(&active, n, t);
+            let p = rss_recover(&active, n, t).unwrap();
             assert_eq!(
                 p.len(),
                 t as usize,
@@ -244,5 +260,15 @@ mod tests {
             verify_partition_covers_all(&p, n, t);
             verify_party_membership(&active, &p);
         }
+    }
+
+    #[test]
+    fn test_invalid_active_set_rejected() {
+        // Duplicate party id.
+        assert_eq!(rss_recover(&[0, 0], 3, 2), Err(Error::InvalidParameters));
+        // Unsorted.
+        assert_eq!(rss_recover(&[2, 1], 3, 2), Err(Error::InvalidParameters));
+        // Out of range.
+        assert_eq!(rss_recover(&[0, 3], 3, 2), Err(Error::InvalidParameters));
     }
 }

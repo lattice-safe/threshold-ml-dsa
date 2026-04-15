@@ -3,6 +3,11 @@
 //! Implements `FVec` and `SampleHyperball` from the reference Go implementation.
 //! The float vector represents an element of R_q^{ℓ+k} in centered floating-point
 //! form, used for hyperball-based rejection sampling (ePrint 2026/013, §2.7).
+//!
+//! Security note: this module uses floating-point arithmetic (`f64`, `libm`) and
+//! therefore does not provide constant-time guarantees on typical hardware.
+//! Deployments with strict local side-channel requirements should isolate party
+//! execution and treat timing leakage in this path as part of the threat model.
 
 extern crate alloc;
 

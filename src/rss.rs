@@ -28,6 +28,7 @@ use alloc::{collections::BTreeMap, vec::Vec};
 #[cfg(feature = "std")]
 use std::collections::BTreeMap;
 
+use crate::error::Error;
 use crate::params::*;
 use crate::poly::{Poly, PolyVecK, PolyVecL};
 use sha3::digest::{ExtendableOutput, Update, XofReader};
@@ -138,26 +139,19 @@ impl core::fmt::Debug for ThresholdPrivateKey {
 /// 6. Public key = (ρ, t₁), tr = CRH(pk)
 ///
 /// # Returns
-/// `(public_key_bytes, Vec<ThresholdPrivateKey>)` — the packed public key
+/// `Ok((public_key_bytes, Vec<ThresholdPrivateKey>))` — the packed public key
 /// and one private key per party.
+///
+/// Returns `Err(Error::InvalidParameters)` when `params` are out of range.
 pub fn keygen_from_seed(
     seed: &[u8; 32],
     params: &ThresholdParams,
-) -> ([u8; PK_BYTES], Vec<ThresholdPrivateKey>) {
+) -> Result<([u8; PK_BYTES], Vec<ThresholdPrivateKey>), Error> {
     let n = params.n;
     let t = params.t;
-    assert!(
-        t >= 2 && t <= n,
-        "invalid threshold parameters: t={}, n={}",
-        t,
-        n
-    );
-    assert!(
-        (n as usize) <= MAX_PARTIES,
-        "unsupported party count n={}, max={}",
-        n,
-        MAX_PARTIES
-    );
+    if !(t >= 2 && t <= n) || (n as usize) > MAX_PARTIES {
+        return Err(Error::InvalidParameters);
+    }
 
     // Expand seed via SHAKE-256
     let mut h = Shake256::default();
@@ -216,8 +210,10 @@ pub fn keygen_from_seed(
 
         // Pre-compute NTT forms
         share.s1h = share.s1.clone();
+        share.s1h.reduce();
         share.s1h.ntt();
         share.s2h = share.s2.clone();
+        share.s2h.reduce();
         share.s2h.ntt();
 
         // 4. Distribute to all parties in this subset
@@ -266,7 +262,7 @@ pub fn keygen_from_seed(
         sk.tr = tr;
     }
 
-    (pk_bytes, sks)
+    Ok((pk_bytes, sks))
 }
 
 /// Sample a polynomial with coefficients uniformly in `[-η, η]`.
@@ -298,12 +294,12 @@ fn sample_leq_eta(p: &mut Poly, seed: &[u8; 64], nonce: u16) {
             if ETA == 2 {
                 if t1 <= 14 {
                     let reduced = t1 - ((205 * t1) >> 10) * 5;
-                    p.coeffs[i] = Q + ETA as i32 - reduced as i32;
+                    p.coeffs[i] = ETA as i32 - reduced as i32;
                     i += 1;
                 }
                 if t2 <= 14 && i < N {
                     let reduced = t2 - ((205 * t2) >> 10) * 5;
-                    p.coeffs[i] = Q + ETA as i32 - reduced as i32;
+                    p.coeffs[i] = ETA as i32 - reduced as i32;
                     i += 1;
                 }
             }
@@ -468,7 +464,7 @@ mod tests {
     fn test_keygen_produces_valid_keys() {
         let seed = [42u8; 32];
         let params = get_threshold_params(2, 3).unwrap();
-        let (pk, sks) = keygen_from_seed(&seed, &params);
+        let (pk, sks) = keygen_from_seed(&seed, &params).unwrap();
 
         // Should produce N=3 private keys
         assert_eq!(sks.len(), 3);
@@ -500,8 +496,8 @@ mod tests {
     fn test_keygen_deterministic() {
         let seed = [7u8; 32];
         let params = get_threshold_params(2, 2).unwrap();
-        let (pk1, _) = keygen_from_seed(&seed, &params);
-        let (pk2, _) = keygen_from_seed(&seed, &params);
+        let (pk1, _) = keygen_from_seed(&seed, &params).unwrap();
+        let (pk2, _) = keygen_from_seed(&seed, &params).unwrap();
         assert_eq!(pk1, pk2);
     }
 
@@ -511,7 +507,7 @@ mod tests {
         for &(t, n) in configs {
             let seed = [t + n; 32];
             let params = get_threshold_params(t, n).unwrap();
-            let (_, sks) = keygen_from_seed(&seed, &params);
+            let (_, sks) = keygen_from_seed(&seed, &params).unwrap();
             assert_eq!(sks.len(), n as usize, "Wrong key count for ({}, {})", t, n);
         }
     }
@@ -521,7 +517,7 @@ mod tests {
         // For (T=2, N=3): C(3,2) = 3 subsets
         let seed = [1u8; 32];
         let params = get_threshold_params(2, 3).unwrap();
-        let (_, sks) = keygen_from_seed(&seed, &params);
+        let (_, sks) = keygen_from_seed(&seed, &params).unwrap();
 
         // Count total unique subset bitmasks
         let mut all_masks: Vec<u8> = Vec::new();
@@ -533,5 +529,22 @@ mod tests {
             }
         }
         assert_eq!(all_masks.len(), num_subsets(3, 2));
+    }
+
+    #[test]
+    fn test_keygen_invalid_params_rejected() {
+        let seed = [0u8; 32];
+        let bad = ThresholdParams {
+            t: 3,
+            n: 2,
+            r: 0.0,
+            r1: 0.0,
+            k_reps: 1,
+            nu: 3.0,
+        };
+        assert!(matches!(
+            keygen_from_seed(&seed, &bad),
+            Err(Error::InvalidParameters)
+        ));
     }
 }

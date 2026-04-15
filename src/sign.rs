@@ -168,6 +168,7 @@ pub fn round1<R: RngCore + CryptoRng>(
 ///
 /// Verifies that all received commitment hashes match the party's Round 1 hashes.
 /// Returns the packed commitment data and state for Round 3.
+#[allow(clippy::too_many_arguments)]
 pub fn round2(
     sk: &ThresholdPrivateKey,
     act: u8,
@@ -243,7 +244,7 @@ pub fn round3(
     st_rd1: &StRound1,    // saved randomness from Round 1
     st_rd2: &StRound2,    // μ and active set from Round 2
     params: &ThresholdParams,
-) -> Vec<PolyVecL> {
+) -> Result<Vec<PolyVecL>, Error> {
     use dilithium::{
         poly::Poly as DPoly,
         polyvec::{polyveck_reduce, polyvecl_reduce, PolyVecK as DPolyVecK, PolyVecL as DPolyVecL},
@@ -255,13 +256,13 @@ pub fn round3(
 
     // Recover this party's partial secret for the active signer set
     let active = bitmask_to_sorted_ids(st_rd2.act, params.n);
-    let partition = partition::rss_recover(&active, params.n, params.t);
+    let partition = partition::rss_recover(&active, params.n, params.t)?;
 
     // Find which partition slot corresponds to this party
     let party_idx = active
         .iter()
         .position(|&id| id == sk.id)
-        .expect("Party must be in active set");
+        .ok_or(Error::InvalidParameters)?;
 
     // Sum the shares assigned to this party by the partition.
     // NOTE: recover_partial_secret returns values ALREADY in NTT domain
@@ -333,14 +334,17 @@ pub fn round3(
             continue;
         }
 
-        // Accepted — round zf back to integer polynomial vectors and output z1.
+        // Accepted — round zf back to integer polynomial vectors.
+        // By protocol design we only transmit the z1 part (PolyVecL); z2 is
+        // used in local rejection algebra but is not part of the final FIPS 204
+        // signature encoding.
         let mut z_out = PolyVecL::zero();
         let mut z2_out = PolyVecK::zero();
         zf.round_to_polyvecs(&mut z_out, &mut z2_out);
         zs.push(z_out);
     }
 
-    zs
+    Ok(zs)
 }
 
 // ─── Internal Helpers ────────────────────────────────────────────────

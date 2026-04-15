@@ -3,7 +3,7 @@
 //! A production-grade implementation of the "Efficient Threshold ML-DSA" scheme
 //! (ePrint 2026/013, Celi et al. — the "Mithril" scheme).
 //!
-//! This crate implements a hardened 4-round distributed signing protocol for ML-DSA (FIPS 204)
+//! This crate implements a hardened 3-round distributed signing protocol for ML-DSA (FIPS 204)
 //! using Replicated Secret Sharing (RSS) and hyperball-based local rejection sampling.
 //! The resulting threshold signatures are bit-for-bit verifiable by any standard,
 //! unmodified ML-DSA verifier.

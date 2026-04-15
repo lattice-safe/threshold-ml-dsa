@@ -756,6 +756,7 @@ The threshold scheme inherits the _Module-LWE/Module-SIS_ hardness assumptions f
 - Sensitive material ($\mathbf{s}_{1,i}$, $\mathbf{y}_i$, seed) is zeroized on drop via `zeroize`
 - Challenge and session binding comparisons use constant-time equality (`subtle::ConstantTimeEq`)
 - All norm checks (`chknorm`) iterate all coefficients/polynomials without early exit
+- Hyperball sampling/rejection uses floating-point (`f64`/`libm`) and should be treated as non-constant-time in strict side-channel models
 
 ### Adversarial Resilience
 

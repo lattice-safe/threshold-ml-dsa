@@ -170,11 +170,14 @@ cargo test --test v03_tests
 | Doctest | 1 | Usage example compilation |
 | **Total (table above)** | **29** | **All passing** |
 
+Current full `cargo test` output includes additional regression/instrumentation suites and is higher than the core v0.3 table above.
+
 ## Security Notes
 
 - **No key decomposition**: Keys are generated fresh per subset — no existing ML-DSA secret is ever split.
 - **Fail-closed signing**: Returned signatures are verified by the standard FIPS 204 verifier before return; otherwise signing retries and eventually returns `InsufficientResponses`.
 - **Hyperball rejection**: Uses Rényi-divergence-safe float L₂ norms instead of L∞ hypercube rejection.
+- **Timing model note**: Hyperball sampling/rejection uses floating-point (`f64`/`libm`) and is not constant-time on typical hardware.
 - **Balanced share assignment**: Algorithm 6 ensures each party receives an equal number of subset secrets.
 - **Memory safe**: Secret material is `zeroize`d on drop.
 - **SDK limitation**: `ThresholdMlDsa44Sdk` is an in-process orchestrator. For production distributed deployments, run parties in isolated processes with authenticated/encrypted transport.
