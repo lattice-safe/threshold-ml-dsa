@@ -34,14 +34,15 @@ use zeroize::Zeroize;
 /// Round 1 state saved by a party for use in Round 3.
 ///
 /// Contains sensitive ephemeral randomness; zeroized on drop.
+/// Fields are `pub(crate)` to prevent external duplication of nonce state.
 pub struct StRound1 {
     /// K packed commitment vectors (each is K polynomials in normal domain)
-    pub w_packed: Vec<Vec<u8>>,
+    pub(crate) w_packed: Vec<Vec<u8>>,
     /// K randomness samples as floating vectors from `SampleHyperball`.
     ///
     /// Round 1 commitments use rounded copies of these vectors.
     /// Round 3 adds them in floating-point before the final rounding step.
-    pub rand_fvecs: Vec<FVec>,
+    pub(crate) rand_fvecs: Vec<FVec>,
 }
 
 impl Drop for StRound1 {
@@ -57,15 +58,16 @@ impl Drop for StRound1 {
 /// Round 2 state saved by a party for use in Round 3.
 ///
 /// Contains commitment hashes and message hash; zeroized on drop.
+/// Fields are `pub(crate)` to prevent external state duplication.
 #[derive(Zeroize)]
 #[zeroize(drop)]
 pub struct StRound2 {
     /// Commitment hashes received from all parties in Round 1
-    pub hashes: Vec<[u8; 32]>,
+    pub(crate) hashes: Vec<[u8; 32]>,
     /// μ = CRH(tr ‖ msg)
-    pub mu: [u8; 64],
+    pub(crate) mu: [u8; 64],
     /// Active signer bitmask
-    pub act: u8,
+    pub(crate) act: u8,
 }
 
 /// Compute μ = CRH(tr ‖ msg).
