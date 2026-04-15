@@ -764,7 +764,7 @@ The threshold scheme inherits the _Module-LWE/Module-SIS_ hardness assumptions f
 - **Replay across sessions/messages** is detected by transcript-bound commitment hashes (ADV-2)
 - **RNG failure** is hedged via transcript-bound nonce derivation (ADV-3)
 - **Invalid aggregates** are blocked by fail-closed end-to-end verification (ADV-4)
-- **Timing attacks** are mitigated by constant-time checks in critical comparisons and norm paths
+- **Timing side-channels**: The final hyperball rejection comparison (`FVec::excess`) uses branchless IEEE 754 bit-level ordering, and the Box-Muller clamp uses `libm::fmax` to avoid data-dependent branches. However, the underlying `f64`/`libm` arithmetic (log, sqrt, sin, cos, accumulation) is **not constant-time** on typical hardware. Deployments with strict local side-channel requirements should isolate party execution in separate processes or enclaves.
 
 ### Liveness
 

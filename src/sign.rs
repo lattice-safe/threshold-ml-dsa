@@ -267,6 +267,17 @@ pub fn verify_round2_reveal(
 /// Takes `st_rd1` by value to enforce one-time use of the nonce randomness.
 /// Calling this function consumes the Round 1 state, preventing replay of
 /// the same hidden randomness with different coordinator-selected challenges.
+///
+/// # Transcript Verification (Distributed Callers)
+///
+/// This function does **not** verify that `wfinals` is consistent with
+/// the per-party commitment hashes stored in `st_rd2.hashes`, because
+/// `wfinals` is an *aggregate* (Σ w_i) — it cannot be compared against
+/// individual per-party hashes without re-deriving the aggregation.
+///
+/// Distributed integrators MUST call [`verify_round2_reveal`] for every
+/// peer's reveal before aggregating, ensuring `wfinals` is derived from
+/// authenticated data. The SDK does this automatically.
 pub fn round3(
     sk: &ThresholdPrivateKey,
     wfinals: &[PolyVecK], // K aggregated commitment vectors
