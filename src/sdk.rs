@@ -179,23 +179,9 @@ impl ThresholdMlDsa44Sdk {
                 rd2_states.push(st2);
             }
 
-            // Verify all reveals against Round-1 hashes and obtain witness.
-            let active_ids: Vec<u8> = active.to_vec();
-            let verified = match sign::verify_all_round2_reveals(
-                &self.sks[active[0] as usize].tr,
-                &active_ids,
-                act,
-                msg,
-                &session_id,
-                &rd2_reveals,
-                &rd1_hashes,
-            ) {
-                Ok(v) => v,
-                Err(_) => continue 'attempt,
-            };
-
             // ── Aggregate commitments ──
             // Parse each party's reveal into K PolyVecK commitments
+            let active_ids: Vec<u8> = active.to_vec();
             let packed_size = sign::pack_w_single_size();
             let mut all_reveals: Vec<Vec<PolyVecK>> = Vec::with_capacity(t);
             for reveal in &rd2_reveals {
@@ -216,6 +202,10 @@ impl ThresholdMlDsa44Sdk {
             };
 
             // ── Round 3: Each party computes K responses ──
+            // Each party independently verifies reveals and obtains its own
+            // consumable VerifiedReveals witness. round3 takes the witness by
+            // value to prevent cross-session replay, so each party needs a
+            // fresh one (mirroring a real distributed deployment).
             // Drain rd1_states: round3 consumes nonce state to prevent replay.
             let mut all_responses: Vec<Vec<PolyVecL>> = Vec::with_capacity(t);
             for (st1, (&party_id, st2)) in rd1_states
@@ -223,7 +213,23 @@ impl ThresholdMlDsa44Sdk {
                 .zip(active.iter().zip(rd2_states.iter()))
             {
                 let sk = &self.sks[party_id as usize];
-                let zs = match sign::round3(sk, &wfinals, st1, st2, &self.params, &verified) {
+
+                // Each party verifies all reveals independently (as in a
+                // distributed deployment) and gets its own consumable witness.
+                let verified = match sign::verify_all_round2_reveals(
+                    &sk.tr,
+                    &active_ids,
+                    act,
+                    msg,
+                    &session_id,
+                    &rd2_reveals,
+                    &rd1_hashes,
+                ) {
+                    Ok(v) => v,
+                    Err(_) => continue 'attempt,
+                };
+
+                let zs = match sign::round3(sk, &wfinals, st1, st2, &self.params, verified) {
                     Ok(v) => v,
                     Err(_) => continue 'attempt,
                 };

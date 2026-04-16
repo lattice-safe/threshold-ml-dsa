@@ -55,18 +55,6 @@ fn trace_one_attempt() {
         rd2_states.push(st2);
     }
 
-    // Verify all reveals and obtain witness for round3
-    let verified = threshold_ml_dsa::sign::verify_all_round2_reveals(
-        sdk.party_key(active[0] as usize).unwrap().tr(),
-        &active,
-        act,
-        msg,
-        &session_id,
-        &rd2_reveals,
-        &rd1_hashes,
-    )
-    .unwrap();
-
     // Aggregate commitments
     let packed_size = threshold_ml_dsa::sign::pack_w_single_size();
     let mut all_reveals = Vec::new();
@@ -84,20 +72,31 @@ fn trace_one_attempt() {
 
     let wfinals = threshold_ml_dsa::coordinator::aggregate_commitments(&all_reveals, k_reps).unwrap();
 
-    // Round 3
+    // Round 3 — each party verifies reveals independently and gets its own
+    // consumable witness (round3 takes VerifiedReveals by value).
     let mut all_responses = Vec::new();
     for (st1, (&party_id, st2)) in rd1_states
         .into_iter()
         .zip(active.iter().zip(rd2_states.iter()))
     {
         let sk = sdk.party_key(party_id as usize).unwrap();
+        let verified = threshold_ml_dsa::sign::verify_all_round2_reveals(
+            sk.tr(),
+            &active,
+            act,
+            msg,
+            &session_id,
+            &rd2_reveals,
+            &rd1_hashes,
+        )
+        .unwrap();
         let zs = threshold_ml_dsa::sign::round3(
             sk,
             &wfinals,
             st1,
             st2,
             sdk.params(),
-            &verified,
+            verified,
         )
         .unwrap();
         all_responses.push(zs);

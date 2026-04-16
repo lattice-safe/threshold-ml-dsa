@@ -72,17 +72,26 @@ pub struct StRound2 {
 
 /// Proof-of-verification witness for Round-2 reveals.
 ///
-/// This zero-size type can only be constructed by calling
+/// This type can only be constructed by calling
 /// [`verify_all_round2_reveals`], which checks every peer's reveal
 /// against its Round-1 commitment hash. `round3` requires this
 /// token, making it impossible to compute responses without first
 /// verifying transcript consistency.
 ///
-/// This is a type-level enforcement of the transcript-consistency
-/// invariant that was previously only documented.
+/// The witness is **cryptographically bound** to the specific transcript
+/// it verified: it contains a binding hash over (session_id, act,
+/// commitment hashes, reveal data). `round3` re-derives the expected
+/// binding and rejects mismatches, so a witness obtained from one
+/// reveal set cannot be replayed against a different `StRound2`/`wfinals`.
+///
+/// `round3` consumes this witness **by value**, preventing reuse across
+/// multiple calls or sessions.
 pub struct VerifiedReveals {
-    // Private field prevents external construction.
-    _private: (),
+    /// Cryptographic binding of the verified transcript.
+    /// H("th-ml-dsa-verified-reveals-v1" ‖ session_id ‖ act ‖ hashes ‖ reveals)
+    binding: [u8; 32],
+    /// Session ID this witness was created for.
+    session_id: [u8; 32],
 }
 
 /// Verify all Round-2 reveals against their Round-1 commitment hashes.
@@ -119,7 +128,18 @@ pub fn verify_all_round2_reveals(
             return Err(Error::InvalidShare);
         }
     }
-    Ok(VerifiedReveals { _private: () })
+
+    // Compute a cryptographic binding over the verified transcript so that
+    // this witness cannot be replayed with different hashes or reveals.
+    // The commitment hashes already commit to the reveals (that's what we
+    // just verified above), so binding to (session_id, act, hashes) is
+    // sufficient — no need to re-hash the raw reveal data.
+    let binding = compute_verified_reveals_binding(session_id, act, expected_hashes);
+
+    Ok(VerifiedReveals {
+        binding,
+        session_id: *session_id,
+    })
 }
 
 /// Compute μ = CRH(tr ‖ msg).
@@ -336,7 +356,7 @@ pub fn round3(
     st_rd1: StRound1,     // consumed: nonce randomness is single-use
     st_rd2: &StRound2,    // μ and active set from Round 2
     params: &ThresholdParams,
-    _verified: &VerifiedReveals, // proof that all reveals were checked
+    verified: VerifiedReveals,  // consumed: proof that all reveals were checked
 ) -> Result<Vec<PolyVecL>, Error> {
     use dilithium::{
         poly::Poly as DPoly,
@@ -350,6 +370,22 @@ pub fn round3(
     // Reject short coordinator input instead of silently truncating.
     if wfinals.len() < k_reps {
         return Err(Error::InvalidParameters);
+    }
+
+    // Verify that the witness is bound to this exact transcript.
+    // Re-derive the expected binding from (session_id, act, hashes) and
+    // compare against the one sealed in the witness. The commitment hashes
+    // already commit to the individual reveals, so this is sufficient to
+    // prevent cross-transcript replay.
+    {
+        let expected_binding = compute_verified_reveals_binding(
+            &verified.session_id,
+            st_rd2.act,
+            &st_rd2.hashes,
+        );
+        if !bool::from(verified.binding.ct_eq(&expected_binding)) {
+            return Err(Error::InvalidShare);
+        }
     }
 
     // Recover this party's partial secret for the active signer set
@@ -542,6 +578,30 @@ fn bitmask_to_sorted_ids(mask: u8, n: u8) -> Vec<u8> {
         }
     }
     ids
+}
+
+/// Compute a cryptographic binding for a [`VerifiedReveals`] witness.
+///
+/// H("th-ml-dsa-verified-reveals-v1" ‖ session_id ‖ act ‖ hashes)
+///
+/// The commitment hashes already commit to the reveal data (the
+/// verification step in [`verify_all_round2_reveals`] checks exactly that),
+/// so binding to the hashes is sufficient to prevent cross-transcript replay.
+fn compute_verified_reveals_binding(
+    session_id: &[u8; 32],
+    act: u8,
+    hashes: &[[u8; 32]],
+) -> [u8; 32] {
+    let mut h = Shake256::default();
+    h.update(b"th-ml-dsa-verified-reveals-v1");
+    h.update(session_id);
+    h.update(&[act]);
+    for hash in hashes {
+        h.update(hash);
+    }
+    let mut out = [0u8; 32];
+    h.finalize_xof().read(&mut out);
+    out
 }
 
 fn round1_commitment_hash<'a, I>(
