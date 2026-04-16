@@ -197,7 +197,7 @@ dependencies = [
 
 [[package]]
 name = "threshold-ml-dsa"
-version = "0.3.4"
+version = "0.3.5"
 dependencies = [
  "dilithium-rs",
  "libm",
