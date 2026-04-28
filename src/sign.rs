@@ -21,7 +21,7 @@ use alloc::vec::Vec;
 
 use crate::error::Error;
 use crate::fvec::{sample_hyperball, FVec};
-use crate::params::{TRBYTES, ThresholdParams, K, L, N, Q, CTILDEBYTES};
+use crate::params::{CTILDEBYTES, MAX_PARTIES, TRBYTES, ThresholdParams, K, L, N, Q};
 use crate::partition;
 use crate::poly::{Poly, PolyVecK, PolyVecL};
 use crate::rss::ThresholdPrivateKey;
@@ -125,6 +125,7 @@ pub fn verify_all_round2_reveals(
     if k_reps == 0 || k_reps > u16::MAX as usize {
         return Err(Error::InvalidParameters);
     }
+    validate_party_ids_match_act(party_ids, act)?;
     for (i, reveal) in reveals.iter().enumerate() {
         if !verify_round2_reveal(
             tr,
@@ -608,6 +609,34 @@ fn bitmask_to_sorted_ids(mask: u8, n: u8) -> Vec<u8> {
     ids
 }
 
+/// Validate that `party_ids` is the canonical sorted party set encoded by `act`.
+fn validate_party_ids_match_act(party_ids: &[u8], act: u8) -> Result<(), Error> {
+    if party_ids.is_empty() {
+        return Err(Error::InvalidParameters);
+    }
+
+    let mut reconstructed = 0u8;
+    let mut prev: Option<u8> = None;
+    for &id in party_ids {
+        if id as usize >= MAX_PARTIES {
+            return Err(Error::InvalidParameters);
+        }
+        if let Some(p) = prev {
+            if id <= p {
+                return Err(Error::InvalidParameters);
+            }
+        }
+        reconstructed |= 1u8 << id;
+        prev = Some(id);
+    }
+
+    if reconstructed != act {
+        return Err(Error::InvalidParameters);
+    }
+
+    Ok(())
+}
+
 /// Compute a cryptographic binding for a [`VerifiedReveals`] witness.
 ///
 /// H("th-ml-dsa-verified-reveals-v1" ‖ session_id ‖ act ‖ hashes ‖ k_reps ‖ wfinals_hash)
@@ -805,6 +834,36 @@ mod tests {
         assert_eq!(ids, vec![1, 3]);
         let ids = bitmask_to_sorted_ids(0, 6);
         assert!(ids.is_empty());
+    }
+
+    #[test]
+    fn test_verify_all_reveals_rejects_malformed_party_set() {
+        let tr = [1u8; TRBYTES];
+        let session_id = [2u8; 32];
+        let msg = b"party set validation";
+        let reveals = vec![Vec::new(), Vec::new()];
+        let hashes = vec![[0u8; 32], [0u8; 32]];
+
+        assert_eq!(
+            verify_all_round2_reveals(&tr, &[0, 0], 0b0000_0011, msg, &session_id, &reveals, &hashes, 1)
+                .err(),
+            Some(Error::InvalidParameters)
+        );
+        assert_eq!(
+            verify_all_round2_reveals(&tr, &[1, 0], 0b0000_0011, msg, &session_id, &reveals, &hashes, 1)
+                .err(),
+            Some(Error::InvalidParameters)
+        );
+        assert_eq!(
+            verify_all_round2_reveals(&tr, &[0, 6], 0b0100_0001, msg, &session_id, &reveals, &hashes, 1)
+                .err(),
+            Some(Error::InvalidParameters)
+        );
+        assert_eq!(
+            verify_all_round2_reveals(&tr, &[0, 2], 0b0000_0011, msg, &session_id, &reveals, &hashes, 1)
+                .err(),
+            Some(Error::InvalidParameters)
+        );
     }
 
     #[test]
