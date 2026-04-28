@@ -1,6 +1,6 @@
 [package]
 name = "threshold-ml-dsa"
-version = "0.3.5"
+version = "0.3.6"
 edition = "2021"
 description = "Threshold ML-DSA (FIPS 204) via the Mithril scheme (ePrint 2026/013)"
 authors = ["Suleyman Kardas <suleyman@lattice-safe.com>", "DeepMind AAC"]
