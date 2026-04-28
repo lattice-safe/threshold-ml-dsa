@@ -224,6 +224,7 @@ impl ThresholdMlDsa44Sdk {
                     &session_id,
                     &rd2_reveals,
                     &rd1_hashes,
+                    k_reps,
                 ) {
                     Ok(v) => v,
                     Err(_) => continue 'attempt,

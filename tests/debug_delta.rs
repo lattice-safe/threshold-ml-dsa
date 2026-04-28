@@ -88,6 +88,7 @@ fn trace_one_attempt() {
             &session_id,
             &rd2_reveals,
             &rd1_hashes,
+            k_reps,
         )
         .unwrap();
         let zs = threshold_ml_dsa::sign::round3(

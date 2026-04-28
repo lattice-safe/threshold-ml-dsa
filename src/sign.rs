@@ -80,9 +80,10 @@ pub struct StRound2 {
 ///
 /// The witness is **cryptographically bound** to the specific transcript
 /// it verified: it contains a binding hash over (session_id, act,
-/// commitment hashes, reveal data). `round3` re-derives the expected
-/// binding and rejects mismatches, so a witness obtained from one
-/// reveal set cannot be replayed against a different `StRound2`/`wfinals`.
+/// commitment hashes, and the aggregated commitments (`wfinals`) derived
+/// from those reveals. `round3` re-derives and checks these bindings, so a
+/// witness obtained from one reveal set cannot be replayed against a
+/// different `StRound2`/`wfinals`.
 ///
 /// `round3` consumes this witness **by value**, preventing reuse across
 /// multiple calls or sessions.
@@ -92,6 +93,11 @@ pub struct VerifiedReveals {
     binding: [u8; 32],
     /// Session ID this witness was created for.
     session_id: [u8; 32],
+    /// Number of parallel slots K used when deriving the aggregate.
+    k_reps: u16,
+    /// Hash of the expected aggregate commitments derived from the
+    /// verified reveals.
+    wfinals_hash: [u8; 32],
 }
 
 /// Verify all Round-2 reveals against their Round-1 commitment hashes.
@@ -111,8 +117,12 @@ pub fn verify_all_round2_reveals(
     session_id: &[u8; 32],
     reveals: &[Vec<u8>],
     expected_hashes: &[[u8; 32]],
+    k_reps: usize,
 ) -> Result<VerifiedReveals, Error> {
     if party_ids.len() != reveals.len() || reveals.len() != expected_hashes.len() {
+        return Err(Error::InvalidParameters);
+    }
+    if k_reps == 0 || k_reps > u16::MAX as usize {
         return Err(Error::InvalidParameters);
     }
     for (i, reveal) in reveals.iter().enumerate() {
@@ -129,16 +139,22 @@ pub fn verify_all_round2_reveals(
         }
     }
 
+    // Re-derive the aggregate commitments from verified reveal payloads and
+    // seal their hash into the witness. round3 will validate coordinator input
+    // against this hash to prevent aggregate-substitution by low-level callers.
+    let wfinals_hash = compute_wfinals_hash_from_reveals(reveals, k_reps)?;
+    let k_reps_u16 = k_reps as u16;
+
     // Compute a cryptographic binding over the verified transcript so that
-    // this witness cannot be replayed with different hashes or reveals.
-    // The commitment hashes already commit to the reveals (that's what we
-    // just verified above), so binding to (session_id, act, hashes) is
-    // sufficient — no need to re-hash the raw reveal data.
-    let binding = compute_verified_reveals_binding(session_id, act, expected_hashes);
+    // this witness cannot be replayed with different hashes or aggregate.
+    let binding =
+        compute_verified_reveals_binding(session_id, act, expected_hashes, k_reps_u16, &wfinals_hash);
 
     Ok(VerifiedReveals {
         binding,
         session_id: *session_id,
+        k_reps: k_reps_u16,
+        wfinals_hash,
     })
 }
 
@@ -342,10 +358,10 @@ pub fn verify_round2_reveal(
 ///
 /// # Transcript Verification (Distributed Callers)
 ///
-/// This function does **not** verify that `wfinals` is consistent with
-/// the per-party commitment hashes stored in `st_rd2.hashes`, because
-/// `wfinals` is an *aggregate* (`Σ w_i`) — it cannot be compared against
-/// individual per-party hashes without re-deriving the aggregation.
+/// This function does not receive raw per-party reveals, so it cannot
+/// directly re-verify each reveal/hash pair. Instead, it enforces aggregate
+/// consistency by checking a hash of `wfinals` against the
+/// [`VerifiedReveals`] witness produced by [`verify_all_round2_reveals`].
 ///
 /// Distributed integrators MUST obtain a [`VerifiedReveals`] token by
 /// calling [`verify_all_round2_reveals`] before calling this function.
@@ -371,17 +387,29 @@ pub fn round3(
     if wfinals.len() < k_reps {
         return Err(Error::InvalidParameters);
     }
+    if verified.k_reps as usize != k_reps {
+        return Err(Error::InvalidParameters);
+    }
+
+    // Ensure the coordinator-supplied aggregates match the reveals that were
+    // previously verified in Round 2.
+    let provided_wfinals_hash = compute_wfinals_hash(&wfinals[..k_reps]);
+    if !bool::from(verified.wfinals_hash.ct_eq(&provided_wfinals_hash)) {
+        return Err(Error::InvalidShare);
+    }
 
     // Verify that the witness is bound to this exact transcript.
-    // Re-derive the expected binding from (session_id, act, hashes) and
+    // Re-derive the expected binding from (session_id, act, hashes, k_reps,
+    // wfinals_hash) and
     // compare against the one sealed in the witness. The commitment hashes
-    // already commit to the individual reveals, so this is sufficient to
-    // prevent cross-transcript replay.
+    // already commit to the individual reveals.
     {
         let expected_binding = compute_verified_reveals_binding(
             &verified.session_id,
             st_rd2.act,
             &st_rd2.hashes,
+            verified.k_reps,
+            &verified.wfinals_hash,
         );
         if !bool::from(verified.binding.ct_eq(&expected_binding)) {
             return Err(Error::InvalidShare);
@@ -582,15 +610,16 @@ fn bitmask_to_sorted_ids(mask: u8, n: u8) -> Vec<u8> {
 
 /// Compute a cryptographic binding for a [`VerifiedReveals`] witness.
 ///
-/// H("th-ml-dsa-verified-reveals-v1" ‖ session_id ‖ act ‖ hashes)
+/// H("th-ml-dsa-verified-reveals-v1" ‖ session_id ‖ act ‖ hashes ‖ k_reps ‖ wfinals_hash)
 ///
-/// The commitment hashes already commit to the reveal data (the
-/// verification step in [`verify_all_round2_reveals`] checks exactly that),
-/// so binding to the hashes is sufficient to prevent cross-transcript replay.
+/// The commitment hashes commit to reveal data, and `wfinals_hash` commits
+/// to the expected aggregate commitments derived from those verified reveals.
 fn compute_verified_reveals_binding(
     session_id: &[u8; 32],
     act: u8,
     hashes: &[[u8; 32]],
+    k_reps: u16,
+    wfinals_hash: &[u8; 32],
 ) -> [u8; 32] {
     let mut h = Shake256::default();
     h.update(b"th-ml-dsa-verified-reveals-v1");
@@ -599,9 +628,54 @@ fn compute_verified_reveals_binding(
     for hash in hashes {
         h.update(hash);
     }
+    h.update(&k_reps.to_le_bytes());
+    h.update(wfinals_hash);
     let mut out = [0u8; 32];
     h.finalize_xof().read(&mut out);
     out
+}
+
+/// Compute a hash of aggregate commitment vectors (`wfinals`).
+///
+/// H("th-ml-dsa-wfinals-v1" ‖ k_reps ‖ pack_w_single(wfinal[0]) ‖ ... )
+fn compute_wfinals_hash(wfinals: &[PolyVecK]) -> [u8; 32] {
+    let mut h = Shake256::default();
+    h.update(b"th-ml-dsa-wfinals-v1");
+    h.update(&(wfinals.len() as u16).to_le_bytes());
+    for w in wfinals {
+        let packed = pack_w_single(w);
+        h.update(&packed);
+    }
+    let mut out = [0u8; 32];
+    h.finalize_xof().read(&mut out);
+    out
+}
+
+/// Re-derive and hash aggregate commitments from verified reveal payloads.
+fn compute_wfinals_hash_from_reveals(reveals: &[Vec<u8>], k_reps: usize) -> Result<[u8; 32], Error> {
+    let packed_size = pack_w_single_size();
+    let expected_len = k_reps
+        .checked_mul(packed_size)
+        .ok_or(Error::InvalidParameters)?;
+    for reveal in reveals {
+        if reveal.len() != expected_len {
+            return Err(Error::InvalidParameters);
+        }
+    }
+
+    let mut wfinals = Vec::with_capacity(k_reps);
+    for k in 0..k_reps {
+        let start = k * packed_size;
+        let end = start + packed_size;
+        let mut acc = PolyVecK::zero();
+        for reveal in reveals {
+            let w = unpack_w_single(&reveal[start..end]);
+            acc.add_assign(&w);
+        }
+        acc.reduce();
+        wfinals.push(acc);
+    }
+    Ok(compute_wfinals_hash(&wfinals))
 }
 
 fn round1_commitment_hash<'a, I>(
