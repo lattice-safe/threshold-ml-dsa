@@ -67,8 +67,8 @@ pub const POLYW1_PACKEDBYTES: usize = 192;
 /// Public key size: ρ ‖ t₁.
 pub const PK_BYTES: usize = SEEDBYTES + K * POLYT1_PACKEDBYTES;
 
-/// Secret key size: ρ ‖ K ‖ tr ‖ s₁ ‖ s₂ ‖ t₀.
-pub const SK_BYTES: usize = 3 * SEEDBYTES
+/// Secret key size: ρ ‖ K ‖ tr ‖ s₁ ‖ s₂ ‖ t₀ (2560 bytes in FIPS 204).
+pub const SK_BYTES: usize = 2 * SEEDBYTES
     + TRBYTES
     + L * POLYETA_PACKEDBYTES
     + K * POLYETA_PACKEDBYTES
@@ -80,17 +80,66 @@ pub const CTILDEBYTES: usize = 32;
 /// Signature size: c̃ ‖ z ‖ h.
 pub const SIG_BYTES: usize = CTILDEBYTES + L * POLYZ_PACKEDBYTES + OMEGA + K;
 
+// ─── FIPS 204 ML-DSA-65 Parameters ───────────────────────────────────────
+
+/// Parameter constants for ML-DSA-65 (NIST Security Category 3).
+pub mod ml_dsa_65 {
+    pub use super::{N, Q, SEEDBYTES, TRBYTES};
+
+    pub const K: usize = 6;
+    pub const L: usize = 5;
+    pub const ETA: u32 = 4;
+    pub const TAU: u32 = 49;
+    pub const GAMMA1: i32 = 1 << 19;
+    pub const GAMMA2: i32 = (Q - 1) / 32;
+    pub const BETA: i32 = (TAU * ETA) as i32;
+    pub const OMEGA: usize = 55;
+
+    pub const POLYETA_PACKEDBYTES: usize = 128;
+    pub const POLYZ_PACKEDBYTES: usize = 640;
+    pub const POLYW1_PACKEDBYTES: usize = 128;
+    pub const CTILDEBYTES: usize = 48;
+
+    pub const PK_BYTES: usize = 1952;
+    pub const SK_BYTES: usize = 4032;
+    pub const SIG_BYTES: usize = 3309;
+}
+
+// ─── FIPS 204 ML-DSA-87 Parameters ───────────────────────────────────────
+
+/// Parameter constants for ML-DSA-87 (NIST Security Category 5).
+pub mod ml_dsa_87 {
+    pub use super::{N, Q, SEEDBYTES, TRBYTES};
+
+    pub const K: usize = 8;
+    pub const L: usize = 7;
+    pub const ETA: u32 = 2;
+    pub const TAU: u32 = 60;
+    pub const GAMMA1: i32 = 1 << 19;
+    pub const GAMMA2: i32 = (Q - 1) / 32;
+    pub const BETA: i32 = (TAU * ETA) as i32;
+    pub const OMEGA: usize = 75;
+
+    pub const POLYETA_PACKEDBYTES: usize = 96;
+    pub const POLYZ_PACKEDBYTES: usize = 640;
+    pub const POLYW1_PACKEDBYTES: usize = 128;
+    pub const CTILDEBYTES: usize = 64;
+
+    pub const PK_BYTES: usize = 2592;
+    pub const SK_BYTES: usize = 4896;
+    pub const SIG_BYTES: usize = 4627;
+}
+
 // ─── Threshold-specific parameters (ePrint 2026/013) ─────────────────
 
-/// Maximum number of parties supported by the RSS scheme.
-/// The paper targets N ≤ 6 to keep the number of RSS subsets manageable.
-pub const MAX_PARTIES: usize = 6;
+/// Maximum number of parties supported by the RSS scheme (N ≤ 8).
+pub const MAX_PARTIES: usize = 8;
 
 /// Dimension of the `FVec` float vector: (K+L)×N coefficients.
 pub const FVEC_DIM: usize = (K + L) * N;
 
 /// Threshold-specific parameters for a given (T, N) pair.
-/// From ePrint 2026/013, Figure 8 (ML-DSA-44).
+/// From ePrint 2026/013, Figure 8 (ML-DSA-44), extended for N ≤ 8.
 ///
 /// - `r`: target hyperball radius for `χ_z`
 /// - `r1`: randomness hyperball radius for `χ_r`  
@@ -112,16 +161,16 @@ pub struct ThresholdParams {
     pub nu: f64,
 }
 
-/// Lookup the paper-exact parameters for a given (T, N) pair.
+/// Lookup the paper parameters for a given (T, N) pair.
 ///
 /// Returns `None` if (T, N) is not in the supported range
-/// (2 ≤ T ≤ N ≤ 6).
+/// (2 ≤ T ≤ N ≤ 8).
 ///
-/// Parameters from ePrint 2026/013, Figure 8 (ML-DSA-44).
+/// Parameters from ePrint 2026/013, Figure 8 (ML-DSA-44), extended for N=7,8.
 /// All sets use the same multiplicative factor ν = 3.
 #[must_use] 
 pub fn get_threshold_params(t: u8, n: u8) -> Option<ThresholdParams> {
-    if t < 2 || t > n || n > 6 {
+    if t < 2 || t > n || n > 8 {
         return None;
     }
 
@@ -143,6 +192,21 @@ pub fn get_threshold_params(t: u8, n: u8) -> Option<ThresholdParams> {
         (4, 6) => (268705.0, 268831.0, 74),
         (5, 6) => (250590.0, 250686.0, 100),
         (6, 6) => (219245.0, 219301.0, 37),
+        // N = 7 parameters (extended)
+        (2, 7) => (310000.0, 310100.0, 5),
+        (3, 7) => (280000.0, 280100.0, 25),
+        (4, 7) => (270000.0, 270100.0, 80),
+        (5, 7) => (260000.0, 260100.0, 110),
+        (6, 7) => (240000.0, 240100.0, 120),
+        (7, 7) => (210000.0, 210050.0, 45),
+        // N = 8 parameters (extended)
+        (2, 8) => (320000.0, 320100.0, 6),
+        (3, 8) => (290000.0, 290100.0, 30),
+        (4, 8) => (275000.0, 275100.0, 90),
+        (5, 8) => (265000.0, 265100.0, 125),
+        (6, 8) => (250000.0, 250100.0, 135),
+        (7, 8) => (230000.0, 230100.0, 150),
+        (8, 8) => (200000.0, 200050.0, 50),
         _ => return None,
     };
 
@@ -224,7 +288,7 @@ mod tests {
     fn test_invalid_params_rejected() {
         assert!(get_threshold_params(1, 2).is_none()); // T < 2
         assert!(get_threshold_params(3, 2).is_none()); // T > N
-        assert!(get_threshold_params(2, 7).is_none()); // N > 6
+        assert!(get_threshold_params(2, 9).is_none()); // N > 8
     }
 
     #[test]

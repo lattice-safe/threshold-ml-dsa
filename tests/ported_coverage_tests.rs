@@ -669,7 +669,7 @@ fn test_params_consistency() {
     assert_eq!(PK_BYTES, SEEDBYTES + K * POLYT1_PACKEDBYTES);
     assert_eq!(
         SK_BYTES,
-        3 * SEEDBYTES
+        2 * SEEDBYTES
             + TRBYTES
             + L * POLYETA_PACKEDBYTES
             + K * POLYETA_PACKEDBYTES

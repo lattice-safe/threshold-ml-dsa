@@ -293,7 +293,7 @@ pub fn keygen_from_seed(
 ///
 /// Uses SHAKE-256 rejection sampling (matching the Go reference
 /// `PolyDeriveUniformLeqEta`).
-fn sample_leq_eta(p: &mut Poly, seed: &[u8; 64], nonce: u16) {
+pub(crate) fn sample_leq_eta(p: &mut Poly, seed: &[u8; 64], nonce: u16) {
     let mut h = Shake256::default();
     let mut iv = [0u8; 66];
     iv[..64].copy_from_slice(seed);
@@ -334,7 +334,7 @@ fn sample_leq_eta(p: &mut Poly, seed: &[u8; 64], nonce: u16) {
 /// Compute the public key bytes: `pk = (ρ ‖ t₁_packed)`.
 ///
 /// Internally: t = `A·NTT⁻¹(s₁_hat)` + s₂, Power2Round(t) → (t₀, t₁)
-fn compute_public_key(rho: &[u8; 32], s1h_total: &PolyVecL, s2_total: &PolyVecK) -> [u8; PK_BYTES] {
+pub(crate) fn compute_public_key(rho: &[u8; 32], s1h_total: &PolyVecL, s2_total: &PolyVecK) -> [u8; PK_BYTES] {
     use dilithium::{
         packing::pack_pk,
         poly::Poly as DPoly,

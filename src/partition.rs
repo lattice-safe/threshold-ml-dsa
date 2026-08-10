@@ -111,7 +111,7 @@ pub fn rss_recover(active: &[u8], n: u8, t: u8) -> Result<Vec<Vec<u8>>, Error> {
             alloc::vec![9, 24, 40],  // {0,3}, {3,4}, {3,5}
             alloc::vec![48, 17, 18], // {4,5}, {0,4}, {1,4}
         ],
-        _ => return Err(Error::InvalidParameters),
+        _ => compute_dynamic_partition(t, n),
     };
 
     // Build the permutation φ: canonical party index → actual party ID
@@ -147,6 +147,51 @@ pub fn rss_recover(active: &[u8], n: u8, t: u8) -> Result<Vec<Vec<u8>>, Error> {
     }
 
     Ok(result)
+}
+
+/// Compute a greedy balanced partition for canonical active signers `{0, ..., T-1}`.
+///
+/// Iterates over all C(N, N-T+1) subsets of size `N-T+1`. Each subset is assigned
+/// to an eligible active signer in `{0, ..., T-1}` that currently holds the fewest
+/// assigned subsets.
+fn compute_dynamic_partition(t: u8, n: u8) -> Vec<Vec<u8>> {
+    let subset_size = n - t + 1;
+    let mut party_loads = alloc::vec![0usize; t as usize];
+    let mut sharing = alloc::vec![Vec::new(); t as usize];
+
+    let mut mask: u16 = (1u16 << subset_size) - 1;
+    let limit: u16 = 1u16 << n;
+
+    while mask < limit {
+        let subset_mask = mask as u8;
+
+        let mut min_load = usize::MAX;
+        let mut chosen_party = 0usize;
+
+        for p in 0..(t as usize) {
+            if (subset_mask & (1 << p)) != 0 {
+                if party_loads[p] < min_load {
+                    min_load = party_loads[p];
+                    chosen_party = p;
+                }
+            }
+        }
+
+        sharing[chosen_party].push(subset_mask);
+        party_loads[chosen_party] += 1;
+
+        let c = mask & mask.wrapping_neg();
+        if c == 0 {
+            break;
+        }
+        let r = mask.wrapping_add(c);
+        if r >= limit {
+            break;
+        }
+        mask = (((r ^ mask) >> 2) / c) | r;
+    }
+
+    sharing
 }
 
 #[cfg(test)]
@@ -228,7 +273,7 @@ mod tests {
     }
 
     #[test]
-    fn test_all_valid_configs() {
+    fn test_all_valid_configs_including_n7_n8() {
         let configs: &[(u8, u8)] = &[
             (2, 2),
             (2, 3),
@@ -245,6 +290,12 @@ mod tests {
             (4, 6),
             (5, 6),
             (6, 6),
+            (2, 7),
+            (4, 7),
+            (7, 7),
+            (2, 8),
+            (5, 8),
+            (8, 8),
         ];
         for &(t, n) in configs {
             // Use canonical active set {0, 1, ..., T-1}

@@ -88,6 +88,60 @@ impl ThresholdMlDsa44Sdk {
         })
     }
 
+    /// Create a threshold SDK by splitting an existing standard ML-DSA-44 secret key.
+    ///
+    /// Implements ePrint 2026/013 §4.2 (a posteriori key sharing).
+    /// The original public key is preserved.
+    pub fn from_existing_key(
+        sk_bytes: &[u8],
+        seed: &[u8; 32],
+        t: u8,
+        n: u8,
+        max_retries: usize,
+    ) -> Result<Self, Error> {
+        let params = get_threshold_params(t, n).ok_or(Error::InvalidParameters)?;
+
+        if max_retries == 0 {
+            return Err(Error::InvalidParameters);
+        }
+
+        let (pk, sks) = crate::aposteriori::share_existing_key(sk_bytes, seed, &params)?;
+
+        Ok(Self {
+            pk,
+            sks,
+            params,
+            max_retries,
+        })
+    }
+
+    /// Create a threshold SDK from DKG contributions and commitments.
+    ///
+    /// Implements ePrint 2026/013 §4.3 (Distributed Key Generation).
+    pub fn from_dkg(
+        contributions: &[(u8, crate::dkg::DkgContribution)],
+        commitments: &[(u8, [u8; 32])],
+        t: u8,
+        n: u8,
+        max_retries: usize,
+    ) -> Result<Self, Error> {
+        let params = get_threshold_params(t, n).ok_or(Error::InvalidParameters)?;
+
+        if max_retries == 0 {
+            return Err(Error::InvalidParameters);
+        }
+
+        let master_seed = crate::dkg::dkg_round2(n, contributions, commitments)?;
+        let (pk, sks) = crate::dkg::dkg_finalize(&master_seed, &params)?;
+
+        Ok(Self {
+            pk,
+            sks,
+            params,
+            max_retries,
+        })
+    }
+
     /// Sign a message using threshold signing.
     ///
     /// # Arguments  
@@ -286,8 +340,8 @@ mod tests {
         assert!(ThresholdMlDsa44Sdk::from_seed(&seed, 1, 2, 10).is_err());
         // T > N
         assert!(ThresholdMlDsa44Sdk::from_seed(&seed, 3, 2, 10).is_err());
-        // N > 6
-        assert!(ThresholdMlDsa44Sdk::from_seed(&seed, 2, 7, 10).is_err());
+        // N > 8
+        assert!(ThresholdMlDsa44Sdk::from_seed(&seed, 2, 9, 10).is_err());
         // max_retries = 0
         assert!(ThresholdMlDsa44Sdk::from_seed(&seed, 2, 2, 0).is_err());
     }

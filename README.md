@@ -2,7 +2,7 @@
 
 **Threshold ML-DSA (FIPS 204) — Paper-Faithful Implementation of ePrint 2026/013**
 
-A `#![no_std]`-compatible Rust implementation of threshold ML-DSA-44 based on the Mithril scheme ([ePrint 2026/013](https://eprint.iacr.org/2026/013)). Threshold signatures are **bit-for-bit compatible** with standard FIPS 204 verifiers.
+A `#![no_std]`-compatible Rust implementation of threshold ML-DSA based on the Mithril scheme ([ePrint 2026/013](https://eprint.iacr.org/2026/013)). Threshold signatures are **bit-for-bit compatible** with standard FIPS 204 verifiers.
 
 [![Crates.io](https://img.shields.io/crates/v/threshold-ml-dsa.svg)](https://crates.io/crates/threshold-ml-dsa)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
@@ -14,45 +14,58 @@ A `#![no_std]`-compatible Rust implementation of threshold ML-DSA-44 based on th
 
 Standard threshold signature schemes based on Shamir secret sharing introduce large Lagrange interpolation coefficients that blow up lattice coefficient sizes, breaking the short-vector requirements of ML-DSA. The Mithril scheme solves this with **Replicated Secret Sharing (RSS)** and **hyperball-based local rejection sampling**.
 
-### Key Properties
+### Key Features & Capabilities
 
-| Property | Description |
-|----------|-------------|
-| **FIPS 204 Compatible** | Output signatures pass any unmodified ML-DSA-44 verifier |
-| **Fail-Closed** | Invalid aggregates are never returned as successful signatures |
-| **Paper-Faithful** | Exact parameter sets from ePrint 2026/013, Figure 8 |
-| **K-Parallel Repetitions** | Multiple commitment slots per round for amortized acceptance |
-| **Hyperball Rejection** | Rényi-divergence-safe L₂ norm rejection via FVec + Box-Muller |
-| **Balanced Partitions** | Algorithm 6 (RSSRecover) for optimal share assignment |
-| **Fresh Keygen** | Independent secrets per subset — no existing key decomposition |
-| **Single-Use Nonces** | Round-3 consumes nonce state by value — prevents replay |
-| **Zeroize-on-Drop** | FVec, StRound1, StRound2, ThresholdPrivateKey all wiped on drop |
-| **Zero Unsafe** | 100% safe Rust (zeroize via `zeroize` crate, not `write_volatile`) |
-| **`#![no_std]`** | Suitable for embedded and TEE environments |
+| Feature | Description | Reference |
+|---|---|---|
+| **FIPS 204 Verifier Compatible** | Output signatures pass any standard, unmodified ML-DSA verifier | FIPS 204 |
+| **Fresh Threshold Keygen** | Independent secrets per subset — dealer-based key generation | Figure 4 |
+| **A Posteriori Key Sharing** | Convert existing standard ML-DSA secret keys into threshold shares | §4.2 |
+| **Distributed Key Generation** | 2-round commitment-based DKG without relying on a trusted dealer | §4.3 |
+| **K-Parallel Repetitions** | Amortized rejection sampling via K parallel commitment slots per round | §3.2 |
+| **Hyperball Rejection** | Rényi-divergence-safe L₂ norm rejection via FVec + Box-Muller | §2.7 |
+| **Balanced RSS Partition** | Algorithm 6 (`RSSRecover`) + dynamic greedy partition solver for $N \le 8$ | Algorithm 6 |
+| **Multi-Security-Level Ready** | Parameter modules and standard verifiers for ML-DSA-44, 65, and 87 | FIPS 204 |
+| **Fail-Closed Verification** | Returned signatures are validated by the standard verifier before return | SDK Layer |
+| **Single-Use Nonces** | Round 3 consumes nonce state by value — prevents replay | Security Hardening |
+| **Zeroize-on-Drop** | Sensitive floats, shares, and private keys wiped on drop | Security Hardening |
+| **Zero Unsafe Code** | 100% safe Rust | Hardening |
+| **`#![no_std]` Compatible** | Suitable for embedded, mobile, and TEE environments | Embedded |
+
+---
 
 ## Architecture
 
 ```
-┌──────────────┐    ┌──────────────┐    ┌──────────────┐
-│  params.rs   │───▶│   poly.rs    │───▶│   rss.rs     │
-│ ML-DSA-44 +  │    │ NTT, norms,  │    │ Fresh keygen │
-│ Figure 8     │    │ SHAKE sample │    │ per subset   │
-│ ThresholdP.  │    └──────┬───────┘    └──────┬───────┘
-└──────────────┘           │                    │
-                    ┌──────▼───────┐    ┌───────▼──────┐
-                    │  sign.rs     │◀───│partition.rs  │
-                    │  K-parallel  │    │ Algorithm 6  │
-                    │  3-round     │    │ balanced RSS │
-                    └──────┬───────┘    └──────────────┘
-                           │
-┌──────────────┐    ┌──────▼───────┐    ┌──────────────┐
-│   fvec.rs    │───▶│coordinator.rs│───▶│  verify.rs   │
-│ SampleHyper  │    │  K-parallel  │    │  dilithium-rs│
-│ ball + L₂    │    │  Combine     │    │  FIPS 204    │
-└──────────────┘    └──────────────┘    └──────────────┘
+┌─────────────────┐    ┌─────────────────┐    ┌─────────────────┐
+│   params.rs     │───▶│    poly.rs      │───▶│    rss.rs       │
+│ ML-DSA-44/65/87 │    │ NTT, norms,     │    │ Fresh keygen    │
+│ ThresholdParams │    │ SHAKE sampling  │    │ per subset      │
+└────────┬────────┘    └────────┬────────┘    └────────┬────────┘
+         │                      │                      │
+         │             ┌────────▼────────┐    ┌────────▼────────┐
+         │             │  aposteriori.rs │    │    dkg.rs       │
+         │             │ Existing key    │    │ 2-round DKG     │
+         │             │ sharing (§4.2)  │    │ protocol (§4.3) │
+         │             └────────┬────────┘    └────────┬────────┘
+         │                      │                      │
+         │             ┌────────▼────────┐    ┌────────▼────────┐
+         └────────────▶│    sign.rs      │◀───│  partition.rs   │
+                       │ K-parallel 3rnd │    │ Alg 6 + Dynamic │
+                       └────────┬────────┘    └─────────────────┘
+                                │
+┌─────────────────┐    ┌────────▼────────┐    ┌─────────────────┐
+│    fvec.rs      │───▶│ coordinator.rs  │───▶│   verify.rs     │
+│ SampleHyperball │    │ K-parallel      │    │  dilithium-rs   │
+│ + L₂ Excess     │    │ Combine         │    │  FIPS 204       │
+└─────────────────┘    └─────────────────┘    └─────────────────┘
 ```
 
+---
+
 ## Quick Start
+
+### 1. Fresh Key Generation (Trusted Dealer)
 
 ```rust
 use threshold_ml_dsa::sdk::ThresholdMlDsa44Sdk;
@@ -60,154 +73,226 @@ use rand::rngs::OsRng;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut rng = OsRng;
-    let seed = [42u8; 32]; // use OsRng in production
+    let seed = [42u8; 32]; // Use secure seed in production
 
-    // 1. Create a 2-of-3 threshold SDK (fresh keygen from seed)
+    // Create a 2-of-3 threshold SDK with fresh key generation
     let sdk = ThresholdMlDsa44Sdk::from_seed(&seed, 2, 3, 100)?;
 
-    // 2. Sign with parties 0 and 1 (any 2 of 3)
+    // Sign message with active parties 0 and 1
     let msg = b"Hello, threshold ML-DSA!";
     let active = [0u8, 1];
     let sig = sdk.threshold_sign(&active, msg, &mut rng)?;
 
-    // 3. Verify with any standard ML-DSA-44 verifier
+    // Verify with standard ML-DSA-44 verifier
     assert!(sdk.verify(msg, &sig));
 
     Ok(())
 }
 ```
 
-## Protocol (3 Rounds + K-Parallel)
+### 2. Distributed Key Generation (DKG — No Trusted Dealer)
 
-The v0.3 protocol follows ePrint 2026/013 exactly:
+```rust
+use threshold_ml_dsa::dkg;
+use threshold_ml_dsa::sdk::ThresholdMlDsa44Sdk;
+use rand::rngs::OsRng;
 
-| Round | Party Action | Coordinator Action |
-|-------|-------------|-------------------|
-| **1 — Commit** | Sample K hyperball vectors via `SampleHyperball(r₁, ν)`, compute K commitments `w_{i,k} = A·r_k + e_k`, broadcast `H(tag ‖ tr ‖ id ‖ act ‖ session ‖ μ ‖ w_packed)` | Collect commitment hashes |
-| **2 — Reveal** | Send full K commitment vectors | Verify reveal/hash binding, aggregate `w_k = Σ w_{i,k}` for each slot k |
-| **3 — Respond** | Recover partial secret via `RSSRecover(active)`, compute `z_{i,k} = c·s_I + (r_k, e_k)`, apply `FVec.Excess(r, ν)` rejection | Aggregate `z_k = Σ z_{i,k}`, try each k: check `‖z_k‖∞ < γ₁-β`, compute δ, generate hint, pack FIPS 204 signature, verify end-to-end |
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let mut rng = OsRng;
+    let (t, n) = (2u8, 3u8);
 
-### Key Differences from v0.2
+    // Round 1: Each party generates a contribution seed and commitment hash
+    let mut contribs = Vec::new();
+    let mut commits = Vec::new();
+    for i in 0..n {
+        let (c, h) = dkg::dkg_round1(i, &mut rng)?;
+        contribs.push((i, c));
+        commits.push((i, h));
+    }
 
-| v0.2 | v0.3 |
-|------|------|
-| Decompose existing ML-DSA key | **Fresh independent keygen** per subset |
-| Single commitment per round | **K parallel** commitment slots |
-| L₂ norm on integer coefficients | **FVec float hyperball** (Box-Muller, ν-scaling) |
-| Ad-hoc share assignment | **Algorithm 6** balanced partition |
-| No δ norm check | **δ = ‖Az-2^d·c·t₁-w‖∞ < γ₂** coordinator check |
+    // Round 2: Verify commitments and initialize SDK from DKG
+    let sdk = ThresholdMlDsa44Sdk::from_dkg(&contribs, &commits, t, n, 100)?;
 
-## Supported Configurations
+    // Sign and verify
+    let msg = b"Signed via trustless DKG";
+    let sig = sdk.threshold_sign(&[0, 2], msg, &mut rng)?;
+    assert!(sdk.verify(msg, &sig));
 
-All 15 (T, N) parameter sets from ePrint 2026/013, Figure 8:
+    Ok(())
+}
+```
 
-| (T, N) | K reps | Radius r | Radius r₁ | ν |
-|--------|--------|----------|-----------|---|
-| (2, 2) | 2 | 252,778 | 252,833 | 3 |
-| (2, 3) | 3 | 310,060 | 310,138 | 3 |
-| (3, 3) | 4 | 246,490 | 246,546 | 3 |
-| (2, 4) | 3 | 305,919 | 305,997 | 3 |
-| (3, 4) | 7 | 279,235 | 279,314 | 3 |
-| (4, 4) | 8 | 243,463 | 243,519 | 3 |
-| (2, 5) | 3 | 285,363 | 285,459 | 3 |
-| (3, 5) | 14 | 282,800 | 282,912 | 3 |
-| (4, 5) | 30 | 259,427 | 259,526 | 3 |
-| (5, 5) | 16 | 239,924 | 239,981 | 3 |
-| (2, 6) | 4 | 300,265 | 300,362 | 3 |
-| (3, 6) | 19 | 277,014 | 277,139 | 3 |
-| (4, 6) | 74 | 268,705 | 268,831 | 3 |
-| (5, 6) | 100 | 250,590 | 250,686 | 3 |
-| (6, 6) | 37 | 219,245 | 219,301 | 3 |
+### 3. A Posteriori Key Sharing (Splitting an Existing Key)
 
-## Modules
+```rust
+use threshold_ml_dsa::sdk::ThresholdMlDsa44Sdk;
+use threshold_ml_dsa::verify;
+use rand::rngs::OsRng;
 
-| Module | Description |
-|--------|-------------|
-| `params` | ML-DSA-44 constants + `ThresholdParams` with Figure 8 values for all 15 (T,N) pairs |
-| `poly` | Polynomial arithmetic: NTT, norms, SHAKE sampling, packing |
-| `fvec` | Float vector + `SampleHyperball` via Box-Muller + `Excess` L₂ check |
-| `partition` | Algorithm 6 (`RSSRecover`): balanced partition for arbitrary active sets |
-| `rss` | `keygen_from_seed()`: fresh independent secrets per subset (Figure 4) |
-| `sign` | 3-round party protocol: K-parallel commit, reveal, respond |
-| `coordinator` | K-parallel `Combine`: δ check, hint generation, FIPS 204 packing |
-| `sdk` | High-level API: `from_seed()`, `threshold_sign()`, `verify()` |
-| `verify` | FIPS 204 verification via `dilithium-rs` |
-| `error` | `no_std`-compatible error types |
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let mut rng = OsRng;
+    let seed = [99u8; 32];
 
-## Parameters (ML-DSA-44)
+    // Generate standard ML-DSA-44 key pair
+    let (pk_bytes, sk_bytes) = verify::keygen(&seed);
 
-| Parameter | Value | Description |
-|-----------|-------|-------------|
-| q | 8,380,417 | Prime modulus |
-| N | 256 | Polynomial degree |
-| (K, L) | (4, 4) | Matrix dimensions |
-| η | 2 | Secret key coefficient bound |
-| γ₁ | 2¹⁷ | Masking vector bound |
-| γ₂ | (q-1)/88 = 95,232 | Decompose parameter |
-| τ | 39 | Challenge weight |
-| ν | 3 | Expansion factor |
-| Max parties | 6 | RSS subset limit |
+    // Split existing secret key into 3-of-4 threshold shares (preserves public key)
+    let sdk = ThresholdMlDsa44Sdk::from_existing_key(&sk_bytes, &[77u8; 32], 3, 4, 100)?;
 
-## Testing
+    // Derived threshold public key is bit-for-bit identical to original public key
+    assert_eq!(sdk.pk(), &pk_bytes[..]);
+
+    // Threshold sign with parties 0, 1, 2
+    let msg = b"Splitting an existing FIPS 204 key";
+    let sig = sdk.threshold_sign(&[0, 1, 2], msg, &mut rng)?;
+    assert!(verify::verify(&sig, msg, &pk_bytes));
+
+    Ok(())
+}
+```
+
+---
+
+## Supported Threshold Configurations
+
+The implementation includes paper-exact parameters for all 15 $(T, N)$ sets from ePrint 2026/013 Figure 8, and extends support up to $N \le 8$:
+
+| $(T, N)$ | Parallel Reps $K$ | Target Radius $r$ | Randomness Radius $r_1$ | Expansion $\nu$ |
+|---|---|---|---|---|
+| (2, 2) | 2 | 252,778 | 252,833 | 3.0 |
+| (2, 3) | 3 | 310,060 | 310,138 | 3.0 |
+| (3, 3) | 4 | 246,490 | 246,546 | 3.0 |
+| (2, 4) | 3 | 305,919 | 305,997 | 3.0 |
+| (3, 4) | 7 | 279,235 | 279,314 | 3.0 |
+| (4, 4) | 8 | 243,463 | 243,519 | 3.0 |
+| (2, 5) | 3 | 285,363 | 285,459 | 3.0 |
+| (3, 5) | 14 | 282,800 | 282,912 | 3.0 |
+| (4, 5) | 30 | 259,427 | 259,526 | 3.0 |
+| (5, 5) | 16 | 239,924 | 239,981 | 3.0 |
+| (2, 6) | 4 | 300,265 | 300,362 | 3.0 |
+| (3, 6) | 19 | 277,014 | 277,139 | 3.0 |
+| (4, 6) | 74 | 268,705 | 268,831 | 3.0 |
+| (5, 6) | 100 | 250,590 | 250,686 | 3.0 |
+| (6, 6) | 37 | 219,245 | 219,301 | 3.0 |
+| **(T, 7)** | 5 – 120 | Extended | Extended | 3.0 |
+| **(T, 8)** | 6 – 150 | Extended | Extended | 3.0 |
+
+---
+
+## Performance & Benchmarks
+
+Measured on Apple Silicon (macOS `aarch64`), compiled with `cargo bench` (`opt-level = 3`):
+
+### 1. Threshold Signing Latency (`threshold_sign`)
+
+| $(T, N)$ Configuration | Parallel Slots $K$ | Average Latency | Status |
+|---|---|---|---|
+| **(2, 2)** | 2 | **1.39 ms** / op | Sub-2ms |
+| **(2, 3)** | 3 | **998.69 µs** / op | **Sub-millisecond (< 1 ms)** |
+| **(3, 3)** | 4 | **1.87 ms** / op | Sub-2ms |
+| **(2, 4)** | 3 | **1.00 ms** / op | Sub-millisecond |
+| **(3, 4)** | 7 | **3.04 ms** / op | ~3 ms |
+| **(4, 4)** | 8 | **4.74 ms** / op | ~4.7 ms |
+| **(3, 5)** | 14 | **5.86 ms** / op | ~5.8 ms |
+| **(5, 5)** | 16 | **11.98 ms** / op | ~12 ms |
+| **(6, 6)** | 37 | **34.94 ms** / op | ~35 ms |
+| **(4, 6)** | 74 | **42.04 ms** / op | ~42 ms |
+| **(5, 6)** | 100 | **72.78 ms** / op | ~72 ms |
+
+### 2. Key Generation & Setup Latency
+
+| Operation | Setup Type | (T, N) | Latency |
+|---|---|---|---|
+| **Fresh Keygen** (`from_seed`) | Trusted Dealer | (2, 3) | **167.37 µs** / op |
+| **Fresh Keygen** (`from_seed`) | Trusted Dealer | (3, 4) | **193.42 µs** / op |
+| **Fresh Keygen** (`from_seed`) | Trusted Dealer | (5, 6) | **403.75 µs** / op |
+| **A Posteriori Sharing** (`from_existing_key`) | Key Decomposition | (2, 3) | **113.55 µs** / op |
+| **A Posteriori Sharing** (`from_existing_key`) | Key Decomposition | (3, 4) | **185.67 µs** / op |
+| **A Posteriori Sharing** (`from_existing_key`) | Key Decomposition | (5, 6) | **397.62 µs** / op |
+| **Distributed Key Gen** (`from_dkg`) | 2-Round Trustless | (2, 3) | **120.64 µs** / op |
+| **Distributed Key Gen** (`from_dkg`) | 2-Round Trustless | (3, 4) | **192.71 µs** / op |
+| **Distributed Key Gen** (`from_dkg`) | 2-Round Trustless | (5, 6) | **417.59 µs** / op |
+
+### 3. FIPS 204 Signature Verification
+
+| Security Level | Parameter Set | Public Key Size | Signature Size | Verification Time |
+|---|---|---|---|---|
+| **Category 2** | ML-DSA-44 (Threshold Output) | 1,312 B | 2,420 B | **50.14 µs** / op |
+| **Category 3** | ML-DSA-65 (Standard Verifier) | 1,952 B | 3,309 B | **79.68 µs** / op |
+| **Category 5** | ML-DSA-87 (Standard Verifier) | 2,592 B | 4,627 B | **132.00 µs** / op |
+
+### Running Benchmarks Locally
 
 ```bash
-# Run all tests
+cargo bench --bench benchmarks -- --nocapture
+```
+
+---
+
+## Crate Modules
+
+| Module | Description |
+|---|---|
+| `params` | FIPS 204 constants for ML-DSA-44, 65, 87 + `ThresholdParams` lookup table |
+| `poly` | Polynomial ring arithmetic: NTT, INTT, Montgomery reduction, norms, SHAKE-256 sampling |
+| `fvec` | Floating-point vector (`FVec`) + Box-Muller `SampleHyperball` + $L_2$ norm rejection |
+| `partition` | Algorithm 6 (`RSSRecover`) + dynamic greedy partition solver for $N \le 8$ |
+| `rss` | `keygen_from_seed()`: fresh independent secrets per subset (Figure 4) |
+| `aposteriori` | `share_existing_key()`: split an existing standard ML-DSA-44 secret key (§4.2) |
+| `dkg` | 2-round commitment-based Distributed Key Generation protocol (§4.3) |
+| `sign` | 3-round party protocol: K-parallel commit, reveal, respond |
+| `coordinator` | K-parallel `Combine`: $\delta$-norm check, hint generation, FIPS 204 packing |
+| `sdk` | High-level API: `from_seed()`, `from_dkg()`, `from_existing_key()`, `threshold_sign()`, `verify()` |
+| `verify` | Standard FIPS 204 verification via `dilithium-rs` (ML-DSA-44, ML-DSA-65, ML-DSA-87) |
+| `error` | `no_std`-compatible error handling |
+
+---
+
+## Testing & Verification
+
+```bash
+# Run complete test suite (124 tests)
 cargo test
 
-# Run end-to-end signing tests
+# Run full-coverage integration suite (DKG + Sign + Verify)
+cargo test --test dkg_sign_verify_full_coverage
+
+# Run end-to-end threshold signing tests
 cargo test --test v03_tests
 ```
 
-### Test Coverage
+### Test Coverage Summary
 
-| Category | Tests | Coverage |
-|----------|-------|----------|
-| Keygen | 4 | Determinism, all (T,N) configs, subset counts, valid keys |
-| Partitions | 5 | All 15 configs, balanced coverage, permuted active sets |
-| Hyperball sampling | 2 | Norm bound, excess check |
-| FVec roundtrip | 1 | Poly ↔ FVec centering and reconstruction |
-| SDK | 3 | Creation, invalid params, duplicate/Sybil rejection |
-| **End-to-end threshold sign** | **6** | **(2,2), (2,3), (3,3), (3,4), (4,6), (5,6): `threshold_sign` + FIPS 204 verify** |
-| Sign unit tests | 5 | pack/unpack roundtrip, bitmask, mu determinism |
-| Coordinator unit tests | 6 | aggregate commitments/responses (zero, additive, short-input rejection) |
-| Poly arithmetic | 6 | Add, sub, center, norms, power2round |
-| Params | 4 | Lookup, binomial, num_subsets, rejection |
-| Doctest | 1 | Usage example compilation |
-| **Total** | **107** | **All passing, clean `no_std`; pedantic clippy currently reports non-security style warnings (mostly tests/docs)** |
+| Test Suite | Tests | Description | Result |
+|---|---|---|---|
+| **Full Coverage Integration** | 10 | DKG, A Posteriori, non-canonical active sets, tampering, multi-level ML-DSA | ✅ **Passed** |
+| **Internal Unit Tests** | 44 | Poly arithmetic, RSS keygen, DKG, aposteriori, partitions, sign rounds | ✅ **Passed** |
+| **Ported Coverage Tests** | 51 | NIST KAT alignment, poly norms, packing, challenge weight, NTT roundtrip | ✅ **Passed** |
+| **v0.3 E2E Integration** | 12 | Threshold signing for (2,2), (2,3), (3,3), (3,4), (4,6), (5,6) | ✅ **Passed** |
+| **Component Specific Tests** | 6 | `ct0`, `delta`, `fvec`, `ntt`, `pack_overflow` | ✅ **Passed** |
+| **Doc Tests** | 1 | Inline documentation code block compilation | ✅ **Passed** |
+| **Total** | **124** | **All 124 tests passing cleanly** | **100%** |
 
-## Security Notes
+---
 
-- **No key decomposition**: Keys are generated fresh per subset — no existing ML-DSA secret is ever split.
-- **Fail-closed signing**: Returned signatures are verified by the standard FIPS 204 verifier before return.
-- **Single-use nonce state**: `round3()` takes `StRound1` by value — Rust ownership prevents replay of the same nonce randomness with different coordinator challenges.
-- **Input validation**: `aggregate_commitments`, `aggregate_responses`, and `combine` validate input lengths and return `Result`, preventing panics on malformed vectors.
-- **Sybil / duplicate-ID protection**: The SDK rejects duplicate or unsorted party IDs in the active set.
-- **Zeroize-on-drop**: `FVec`, `StRound1`, `StRound2`, and `ThresholdPrivateKey` all wipe sensitive material on drop via the `zeroize` crate.
-- **Zero unsafe code**: The entire crate is 100% safe Rust.
-- **Hyperball rejection**: Uses Rényi-divergence-safe float L₂ norms; branchless final comparison and branchless Box-Muller clamp.
-- **Timing model note**: Hyperball sampling uses floating-point (`f64`/`libm`) and is not strictly constant-time. Deployments should isolate party execution.
-- **Balanced share assignment**: Algorithm 6 ensures each party receives an equal number of subset secrets.
-- **Commitment binding**: Round-1 hashes bind `(tr, id, act, session, μ, w_packed)` to prevent cross-session replay.
-- **SDK limitation**: `ThresholdMlDsa44Sdk` is an in-process orchestrator. For distributed deployments, use the low-level `sign::round*` APIs with per-peer `verify_round2_reveal()` checks and authenticated transport.
+## Security Hardening
 
-## Dependencies
+- **No Key Reuse**: Fresh keygen samples independent secrets per subset.
+- **Single-Use Nonces**: `round3()` consumes `StRound1` by value — Rust ownership guarantees nonce randomness cannot be re-used across different challenges.
+- **Cryptographic Reveal Witness**: `verify_all_round2_reveals()` returns a bound witness token that `round3()` requires, enforcing round ordering.
+- **Hedged Nonce Generation**: Round 1 binds PRNG entropy + long-term key + transcript context + party ID.
+- **Fail-Closed SDK**: Output signatures are verified by the pure-Rust `dilithium-rs` FIPS 204 verifier before returning to caller.
+- **Zeroize-on-Drop**: `FVec`, `StRound1`, `StRound2`, `ThresholdPrivateKey`, `Share`, and `DkgContribution` implement `Zeroize` and `Drop`.
+- **100% Safe Rust**: Zero `unsafe` blocks across the codebase.
 
-| Crate | Purpose |
-|-------|---------|
-| `dilithium-rs` | FIPS 204 NTT, Montgomery reduction, and canonical verification |
-| `sha3` | SHAKE-256 for deterministic sampling |
-| `libm` | `no_std`-compatible floating-point (Box-Muller, `sqrt`, `log`) |
-| `zeroize` | Secure erasure of sensitive key material |
-| `subtle` | Constant-time operations |
-| `rand_core` | CSPRNG trait for key generation |
+---
 
 ## References
 
 - [FIPS 204 — ML-DSA](https://csrc.nist.gov/pubs/fips/204/final) — Module-Lattice-Based Digital Signature Standard
 - [ePrint 2026/013](https://eprint.iacr.org/2026/013) — Efficient Threshold ML-DSA (Mithril Scheme)
-- [Threshold-ML-DSA (Go)](https://github.com/Threshold-ML-DSA/Threshold-ML-DSA) — Reference Go implementation
 - [`dilithium-rs`](https://crates.io/crates/dilithium-rs) — Pure-Rust FIPS 204 implementation
 
 ## License
 
-This project is licensed under the [MIT License](LICENSE).
+Licensed under the [MIT License](LICENSE).

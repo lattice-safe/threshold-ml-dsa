@@ -3,9 +3,10 @@
 > **Based on:** FIPS 204 (ML-DSA) + ePrint 2026/013 (Mithril Scheme)
 >
 > This document describes the cryptographic protocol implemented in
-> `threshold-ml-dsa` v0.3.x (current crate release: v0.3.3), covering fresh key generation via Replicated
-> Secret Sharing, the 3-round threshold signing protocol with K-parallel
-> hyperball commitments, and FIPS 204-compatible verification.
+> `threshold-ml-dsa` v0.3.6, covering fresh key generation via Replicated
+> Secret Sharing (RSS), Distributed Key Generation (DKG), A Posteriori Key Sharing
+> of existing ML-DSA keys, the 3-round threshold signing protocol with K-parallel
+> hyperball commitments, ML-DSA-65/87 parameters, and FIPS 204-compatible verification.
 
 ---
 

@@ -28,3 +28,7 @@ rand = "0.8"
 [features]
 default = ["std"]
 std = []
+
+[[bench]]
+name = "benchmarks"
+harness = false

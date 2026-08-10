@@ -855,7 +855,7 @@ mod tests {
             Some(Error::InvalidParameters)
         );
         assert_eq!(
-            verify_all_round2_reveals(&tr, &[0, 6], 0b0100_0001, msg, &session_id, &reveals, &hashes, 1)
+            verify_all_round2_reveals(&tr, &[0, 8], 129, msg, &session_id, &reveals, &hashes, 1)
                 .err(),
             Some(Error::InvalidParameters)
         );

@@ -42,7 +42,9 @@
 #[cfg(not(feature = "std"))]
 extern crate alloc;
 
+pub mod aposteriori;
 pub mod coordinator;
+pub mod dkg;
 pub mod error;
 pub mod fvec;
 pub mod params;
