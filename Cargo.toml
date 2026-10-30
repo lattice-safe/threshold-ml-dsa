@@ -1,6 +1,6 @@
 [package]
 name = "threshold-ml-dsa"
-version = "0.4.1"
+version = "0.5.0"
 edition = "2021"
 description = "Threshold ML-DSA (FIPS 204) via the Mithril scheme (ePrint 2026/013)"
 authors = ["Suleyman Kardas <suleyman@lattice-safe.com>", "DeepMind AAC"]
@@ -28,7 +28,16 @@ rand = "0.8"
 [features]
 default = ["std"]
 std = []
+# Exposes `dkg` and `aposteriori`, which DO NOT provide threshold security:
+# the DKG gives every participant (and any observer) the full secret key, and
+# a posteriori sharing leaks the original secret to sub-threshold coalitions.
+# For testing and interoperability experiments only.
+insecure-keygen = []
 
 [[bench]]
 name = "benchmarks"
 harness = false
+
+[[test]]
+name = "dkg_sign_verify_full_coverage"
+required-features = ["insecure-keygen"]

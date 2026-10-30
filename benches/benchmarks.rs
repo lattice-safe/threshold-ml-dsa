@@ -3,12 +3,9 @@
 use rand::rngs::StdRng;
 use rand::SeedableRng;
 use std::time::Instant;
-use threshold_ml_dsa::{
-    dkg,
-    params::SK_BYTES,
-    sdk::ThresholdMlDsa44Sdk,
-    verify,
-};
+#[cfg(feature = "insecure-keygen")]
+use threshold_ml_dsa::{dkg, params::SK_BYTES};
+use threshold_ml_dsa::{sdk::ThresholdMlDsa44Sdk, verify};
 
 fn main() {
     println!("\n==========================================================");
@@ -48,41 +45,45 @@ fn main() {
         println!("  Fresh Keygen ({}, {}): {:8.2?} / op", t, n, per_op);
     }
 
-    // ─── 2. A Posteriori Key Sharing Benchmarks ───────────────────────────
-    println!("\n--- 2. A Posteriori Key Sharing (from_existing_key) ---");
-    let (pk_std, sk_std) = verify::keygen(&[99u8; 32]);
-    let mut sk_fixed = [0u8; SK_BYTES];
-    sk_fixed.copy_from_slice(&sk_std);
+    // Sections 2 and 3 exercise insecure key setups (feature `insecure-keygen`).
+    #[cfg(feature = "insecure-keygen")]
+    {
+        // ─── 2. A Posteriori Key Sharing Benchmarks ───────────────────────────
+        println!("\n--- 2. A Posteriori Key Sharing (from_existing_key) ---");
+        let (_pk_std, sk_std) = verify::keygen(&[99u8; 32]);
+        let mut sk_fixed = [0u8; SK_BYTES];
+        sk_fixed.copy_from_slice(&sk_std);
 
-    for &(t, n) in &[(2, 2), (2, 3), (3, 4), (5, 6)] {
-        let iters = 100;
-        let start = Instant::now();
-        for _ in 0..iters {
-            let _ = ThresholdMlDsa44Sdk::from_existing_key(&sk_fixed, &[1u8; 32], t, n, 10).unwrap();
-        }
-        let elapsed = start.elapsed();
-        let per_op = elapsed / iters as u32;
-        println!("  A Posteriori Sharing ({}, {}): {:8.2?} / op", t, n, per_op);
-    }
-
-    // ─── 3. Distributed Key Generation (DKG) Benchmarks ──────────────────
-    println!("\n--- 3. Distributed Key Generation (DKG) ---");
-    for &(t, n) in &[(2, 3), (3, 4), (5, 6)] {
-        let iters = 50;
-        let start = Instant::now();
-        for _ in 0..iters {
-            let mut contribs = Vec::new();
-            let mut commits = Vec::new();
-            for i in 0..n {
-                let (c, h) = dkg::dkg_round1(i, &mut rng).unwrap();
-                contribs.push((i, c));
-                commits.push((i, h));
+        for &(t, n) in &[(2, 2), (2, 3), (3, 4), (5, 6)] {
+            let iters = 100;
+            let start = Instant::now();
+            for _ in 0..iters {
+                let _ = ThresholdMlDsa44Sdk::from_existing_key(&sk_fixed, &[1u8; 32], t, n, 10).unwrap();
             }
-            let _ = ThresholdMlDsa44Sdk::from_dkg(&contribs, &commits, t, n, 10).unwrap();
+            let elapsed = start.elapsed();
+            let per_op = elapsed / iters as u32;
+            println!("  A Posteriori Sharing ({}, {}): {:8.2?} / op", t, n, per_op);
         }
-        let elapsed = start.elapsed();
-        let per_op = elapsed / iters as u32;
-        println!("  Full DKG Protocol ({}, {}): {:8.2?} / op", t, n, per_op);
+
+        // ─── 3. Distributed Key Generation (DKG) Benchmarks ──────────────────
+        println!("\n--- 3. Distributed Key Generation (DKG) ---");
+        for &(t, n) in &[(2, 3), (3, 4), (5, 6)] {
+            let iters = 50;
+            let start = Instant::now();
+            for _ in 0..iters {
+                let mut contribs = Vec::new();
+                let mut commits = Vec::new();
+                for i in 0..n {
+                    let (c, h) = dkg::dkg_round1(i, &mut rng).unwrap();
+                    contribs.push((i, c));
+                    commits.push((i, h));
+                }
+                let _ = ThresholdMlDsa44Sdk::from_dkg(&contribs, &commits, t, n, 10).unwrap();
+            }
+            let elapsed = start.elapsed();
+            let per_op = elapsed / iters as u32;
+            println!("  Full DKG Protocol ({}, {}): {:8.2?} / op", t, n, per_op);
+        }
     }
 
     // ─── 4. Threshold Signing Benchmarks ──────────────────────────────────

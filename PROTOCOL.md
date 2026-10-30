@@ -3,10 +3,11 @@
 > **Based on:** FIPS 204 (ML-DSA) + ePrint 2026/013 (Mithril Scheme)
 >
 > This document describes the cryptographic protocol implemented in
-> `threshold-ml-dsa` v0.4.1, covering fresh key generation via Replicated
-> Secret Sharing (RSS), Distributed Key Generation (DKG), A Posteriori Key Sharing
-> of existing ML-DSA keys, the 3-round threshold signing protocol with K-parallel
-> hyperball commitments, ML-DSA-65/87 parameters, and FIPS 204-compatible verification.
+> `threshold-ml-dsa` v0.5.0, covering fresh key generation via Replicated
+> Secret Sharing (RSS), the 3-round threshold signing protocol with K-parallel
+> hyperball commitments for ML-DSA-44 with N ≤ 6, and FIPS 204-compatible
+> verification. The DKG and A Posteriori Key Sharing modules are behind the
+> non-default `insecure-keygen` feature and do not provide threshold security.
 
 ---
 
@@ -567,7 +568,7 @@ The implementation defends against the following adversarial capabilities:
 |----|--------|---------|----------|
 | ADV-1 | Commitment equivocation between rounds | Commitment binding | Round-1 hash over `(tr,id,act,session,mu,w_packed)` must match Round-2 reveal |
 | ADV-2 | Replay of stale commitments across sessions/messages | Session binding | Commitment hash includes `session_id` and `mu = CRH(tr || msg)` |
-| ADV-3 | RNG rollback / nonce reuse | Hedged nonces | Round-1 nonce seed binds RNG entropy + key material + transcript context |
+| ADV-3 | RNG rollback / nonce reuse | **Not mitigated** | Round-1 nonce seed binds RNG entropy + key material + transcript context, but the coordinator can replay the transcript, so a repeated RNG output reuses y and reveals s₁_I. Each party's RNG must never repeat. |
 | ADV-4 | Invalid aggregate emitted as success | Fail-closed verification | `combine()` and SDK path verify candidate signatures before returning |
 | ADV-5 | Hint/packing divergence from verifier path | Algebraic alignment | `f = Az - ct1*2^d - w`, centered low bits for `MakeHint`, centered `z` packing |
 
@@ -767,7 +768,7 @@ The threshold scheme inherits the _Module-LWE/Module-SIS_ hardness assumptions f
 
 - **Malicious coordinator** cannot alter revealed commitments after Round 1 (ADV-1)
 - **Replay across sessions/messages** is detected by transcript-bound commitment hashes (ADV-2)
-- **RNG failure** is hedged via transcript-bound nonce derivation (ADV-3)
+- **RNG failure** is NOT mitigated: a repeated RNG output lets a coordinator recover the party's partial secret (ADV-3)
 - **Invalid aggregates** are blocked by fail-closed end-to-end verification (ADV-4)
 - **Timing side-channels**: The final hyperball rejection comparison (`FVec::excess`) uses branchless IEEE 754 bit-level ordering, and the Box-Muller clamp uses `libm::fmax` to avoid data-dependent branches. However, the underlying `f64`/`libm` arithmetic (log, sqrt, sin, cos, accumulation) is **not constant-time** on typical hardware. Deployments with strict local side-channel requirements should isolate party execution in separate processes or enclaves.
 

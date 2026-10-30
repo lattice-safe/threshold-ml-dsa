@@ -42,8 +42,14 @@
 #[cfg(not(feature = "std"))]
 extern crate alloc;
 
+/// **Insecure**: splitting an existing key leaks it to sub-threshold
+/// coalitions. Only available with the `insecure-keygen` feature.
+#[cfg(feature = "insecure-keygen")]
 pub mod aposteriori;
 pub mod coordinator;
+/// **Insecure**: every participant learns the full secret key. Only
+/// available with the `insecure-keygen` feature.
+#[cfg(feature = "insecure-keygen")]
 pub mod dkg;
 pub mod error;
 pub mod fvec;

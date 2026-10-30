@@ -252,6 +252,7 @@ pub fn keygen_from_seed(
         s1h_total.add_assign(&share.s1h);
         s2_total.add_assign(&share.s2);
         s2h_total.add_assign(&share.s2h);
+        sseed.zeroize();
 
         // Gosper's hack: advance to next subset bitmask with same popcount
         let c = mask & mask.wrapping_neg();
@@ -273,6 +274,11 @@ pub fn keygen_from_seed(
 
     // 7. Compute public key: t = A·s₁ + s₂, Power2Round → (t₀, t₁)
     let pk_bytes = compute_public_key(&rho, &s1h_total, &s2_total);
+    // The totals are the full secret (s₁, s₂); wipe them.
+    s1_total.zeroize();
+    s1h_total.zeroize();
+    s2_total.zeroize();
+    s2h_total.zeroize();
 
     // 8. Compute tr = CRH(pk)
     let mut tr = [0u8; TRBYTES];

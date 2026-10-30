@@ -90,8 +90,9 @@ impl ThresholdMlDsa44Sdk {
 
     /// Create a threshold SDK by splitting an existing standard ML-DSA-44 secret key.
     ///
-    /// Implements ePrint 2026/013 §4.2 (a posteriori key sharing).
-    /// The original public key is preserved.
+    /// **Insecure** (requires the `insecure-keygen` feature): the shares
+    /// leak the original secret to coalitions smaller than T.
+    #[cfg(feature = "insecure-keygen")]
     pub fn from_existing_key(
         sk_bytes: &[u8],
         seed: &[u8; 32],
@@ -117,7 +118,10 @@ impl ThresholdMlDsa44Sdk {
 
     /// Create a threshold SDK from DKG contributions and commitments.
     ///
-    /// Implements ePrint 2026/013 §4.3 (Distributed Key Generation).
+    /// **Insecure** (requires the `insecure-keygen` feature): the master seed
+    /// is derived from publicly revealed contributions, so every participant
+    /// and any observer of the broadcast can derive the full secret key.
+    #[cfg(feature = "insecure-keygen")]
     pub fn from_dkg(
         contributions: &[(u8, crate::dkg::DkgContribution)],
         commitments: &[(u8, [u8; 32])],
@@ -214,7 +218,7 @@ impl ThresholdMlDsa44Sdk {
             let mut rd2_reveals: Vec<Vec<u8>> = Vec::with_capacity(t);
             let mut rd2_states: Vec<sign::StRound2> = Vec::with_capacity(t);
 
-            for (idx, &party_id) in active.iter().enumerate() {
+            for (idx, (&party_id, st1)) in active.iter().zip(rd1_states).enumerate() {
                 let sk = &self.sks[party_id as usize];
                 let (reveal, st2) = match sign::round2(
                     sk,
@@ -223,7 +227,7 @@ impl ThresholdMlDsa44Sdk {
                     &session_id,
                     &rd1_hashes,
                     &rd1_hashes[idx],
-                    &rd1_states[idx],
+                    st1,
                     &self.params,
                 ) {
                     Ok(v) => v,
@@ -260,12 +264,9 @@ impl ThresholdMlDsa44Sdk {
             // consumable VerifiedReveals witness. round3 takes the witness by
             // value to prevent cross-session replay, so each party needs a
             // fresh one (mirroring a real distributed deployment).
-            // Drain rd1_states: round3 consumes nonce state to prevent replay.
+            // round3 consumes the Round 2 state (and with it the nonce state).
             let mut all_responses: Vec<Vec<PolyVecL>> = Vec::with_capacity(t);
-            for (st1, (&party_id, st2)) in rd1_states
-                .into_iter()
-                .zip(active.iter().zip(rd2_states.iter()))
-            {
+            for (&party_id, st2) in active.iter().zip(rd2_states) {
                 let sk = &self.sks[party_id as usize];
 
                 // Each party verifies all reveals independently (as in a
@@ -284,7 +285,7 @@ impl ThresholdMlDsa44Sdk {
                     Err(_) => continue 'attempt,
                 };
 
-                let zs = match sign::round3(sk, &wfinals, st1, st2, &self.params, verified) {
+                let zs = match sign::round3(sk, &wfinals, st2, &self.params, verified) {
                     Ok(v) => v,
                     Err(_) => continue 'attempt,
                 };
@@ -340,8 +341,8 @@ mod tests {
         assert!(ThresholdMlDsa44Sdk::from_seed(&seed, 1, 2, 10).is_err());
         // T > N
         assert!(ThresholdMlDsa44Sdk::from_seed(&seed, 3, 2, 10).is_err());
-        // N > 8
-        assert!(ThresholdMlDsa44Sdk::from_seed(&seed, 2, 9, 10).is_err());
+        // N > 6
+        assert!(ThresholdMlDsa44Sdk::from_seed(&seed, 2, 7, 10).is_err());
         // max_retries = 0
         assert!(ThresholdMlDsa44Sdk::from_seed(&seed, 2, 2, 0).is_err());
     }

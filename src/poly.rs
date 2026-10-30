@@ -27,7 +27,8 @@ pub struct Poly {
 
 impl core::fmt::Debug for Poly {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        write!(f, "Poly([{}; {}])", self.coeffs[0], N)
+        // Never print coefficients: a Poly may hold secret material.
+        write!(f, "Poly([..; {N}])")
     }
 }
 
@@ -176,18 +177,18 @@ impl Poly {
 
         let mut buf = [0u8; 1];
         let mut ctr = 0;
-        // η = 2: sample from {0,1,2,3,4} then subtract η
+        // η = 2: FIPS 204 CoeffFromHalfByte accepts b < 15 and maps
+        // b ↦ η − (b mod 5).
         while ctr < N {
             reader.read(&mut buf);
             let t0 = i32::from(buf[0] & 0x0F);
             let t1 = i32::from(buf[0] >> 4);
-            if t0 < 5 {
-                // For η=2: coefficients are in {0,1,2,3,4} → map to {-2,-1,0,1,2}
-                a.coeffs[ctr] = ETA as i32 - t0;
+            if t0 < 15 {
+                a.coeffs[ctr] = ETA as i32 - t0 % 5;
                 ctr += 1;
             }
-            if ctr < N && t1 < 5 {
-                a.coeffs[ctr] = ETA as i32 - t1;
+            if ctr < N && t1 < 15 {
+                a.coeffs[ctr] = ETA as i32 - t1 % 5;
                 ctr += 1;
             }
         }
@@ -290,14 +291,16 @@ impl Poly {
 
     /// Pack z polynomial (coefficients in [-(γ₁-1), γ₁], 18 bits each).
     ///
-    /// Coefficients must be in centered form. Computes t = γ₁ - coeff
-    /// which is always in [0, 2·γ₁] when ‖z‖∞ < γ₁.
+    /// Coefficients may be in any representative mod q; they are centered
+    /// first. Computes t = γ₁ - coeff, which is in [0, 2·γ₁] when ‖z‖∞ < γ₁.
     pub fn pack_z(&self, r: &mut [u8]) {
         debug_assert!(r.len() >= POLYZ_PACKEDBYTES);
         let mut t = [0u32; 4];
         for i in 0..N / 4 {
             for (j, tv) in t.iter_mut().enumerate() {
-                *tv = (GAMMA1 - self.coeffs[4 * i + j]) as u32;
+                let c = center(self.coeffs[4 * i + j]);
+                debug_assert!(c.abs() <= GAMMA1);
+                *tv = (GAMMA1 - c) as u32;
             }
             r[9 * i] = t[0] as u8;
             r[9 * i + 1] = (t[0] >> 8) as u8;
@@ -555,8 +558,8 @@ impl MatrixA {
         for (i, row) in rows.iter_mut().enumerate().take(K) {
             for (j, poly) in row.iter_mut().enumerate().take(L) {
                 let nonce = ((i as u16) << 8) | (j as u16);
+                // FIPS 204 ExpandA samples Â directly in the NTT domain.
                 Poly::uniform(poly, rho, nonce);
-                poly.ntt();
             }
         }
         MatrixA { rows }

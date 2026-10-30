@@ -290,12 +290,6 @@ mod tests {
             (4, 6),
             (5, 6),
             (6, 6),
-            (2, 7),
-            (4, 7),
-            (7, 7),
-            (2, 8),
-            (5, 8),
-            (8, 8),
         ];
         for &(t, n) in configs {
             // Use canonical active set {0, 1, ..., T-1}

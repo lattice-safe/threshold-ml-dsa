@@ -132,14 +132,17 @@ pub mod ml_dsa_87 {
 
 // ─── Threshold-specific parameters (ePrint 2026/013) ─────────────────
 
-/// Maximum number of parties supported by the RSS scheme (N ≤ 8).
-pub const MAX_PARTIES: usize = 8;
+/// Maximum number of parties supported by the RSS scheme (N ≤ 6).
+///
+/// ePrint 2026/013 and the reference implementation only give parameters
+/// for N ≤ 6.
+pub const MAX_PARTIES: usize = 6;
 
 /// Dimension of the `FVec` float vector: (K+L)×N coefficients.
 pub const FVEC_DIM: usize = (K + L) * N;
 
 /// Threshold-specific parameters for a given (T, N) pair.
-/// From ePrint 2026/013, Figure 8 (ML-DSA-44), extended for N ≤ 8.
+/// From ePrint 2026/013, Figure 8 (ML-DSA-44).
 ///
 /// - `r`: target hyperball radius for `χ_z`
 /// - `r1`: randomness hyperball radius for `χ_r`  
@@ -164,13 +167,14 @@ pub struct ThresholdParams {
 /// Lookup the paper parameters for a given (T, N) pair.
 ///
 /// Returns `None` if (T, N) is not in the supported range
-/// (2 ≤ T ≤ N ≤ 8).
+/// (2 ≤ T ≤ N ≤ 6).
 ///
-/// Parameters from ePrint 2026/013, Figure 8 (ML-DSA-44), extended for N=7,8.
+/// Parameters from ePrint 2026/013, Figure 8 (ML-DSA-44). N = 7, 8 are not
+/// supported until parameters are derived with the paper's scripts.
 /// All sets use the same multiplicative factor ν = 3.
 #[must_use] 
 pub fn get_threshold_params(t: u8, n: u8) -> Option<ThresholdParams> {
-    if t < 2 || t > n || n > 8 {
+    if t < 2 || t > n || n as usize > MAX_PARTIES {
         return None;
     }
 
@@ -192,21 +196,6 @@ pub fn get_threshold_params(t: u8, n: u8) -> Option<ThresholdParams> {
         (4, 6) => (268705.0, 268831.0, 74),
         (5, 6) => (250590.0, 250686.0, 100),
         (6, 6) => (219245.0, 219301.0, 37),
-        // N = 7 parameters (extended)
-        (2, 7) => (310000.0, 310100.0, 5),
-        (3, 7) => (280000.0, 280100.0, 25),
-        (4, 7) => (270000.0, 270100.0, 80),
-        (5, 7) => (260000.0, 260100.0, 110),
-        (6, 7) => (240000.0, 240100.0, 120),
-        (7, 7) => (210000.0, 210050.0, 45),
-        // N = 8 parameters (extended)
-        (2, 8) => (320000.0, 320100.0, 6),
-        (3, 8) => (290000.0, 290100.0, 30),
-        (4, 8) => (275000.0, 275100.0, 90),
-        (5, 8) => (265000.0, 265100.0, 125),
-        (6, 8) => (250000.0, 250100.0, 135),
-        (7, 8) => (230000.0, 230100.0, 150),
-        (8, 8) => (200000.0, 200050.0, 50),
         _ => return None,
     };
 

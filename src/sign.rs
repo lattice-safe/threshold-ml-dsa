@@ -57,7 +57,9 @@ impl Drop for StRound1 {
 
 /// Round 2 state saved by a party for use in Round 3.
 ///
-/// Contains commitment hashes and message hash; zeroized on drop.
+/// Owns the Round 1 state: `round2` consumes `StRound1` by value, so a party
+/// can reveal its commitment for a given nonce at most once, and `round3`
+/// consumes this state by value, so a nonce answers at most one challenge.
 /// Fields are `pub(crate)` to prevent external state duplication.
 #[derive(Zeroize)]
 #[zeroize(drop)]
@@ -68,6 +70,11 @@ pub struct StRound2 {
     pub(crate) mu: [u8; 64],
     /// Active signer bitmask
     pub(crate) act: u8,
+    /// Session ID the Round 1 commitment was bound to
+    pub(crate) session_id: [u8; 32],
+    /// Round 1 nonce state (zeroized by its own Drop impl)
+    #[zeroize(skip)]
+    pub(crate) st1: StRound1,
 }
 
 /// Proof-of-verification witness for Round-2 reveals.
@@ -175,6 +182,13 @@ pub fn compute_mu(tr: &[u8; TRBYTES], msg: &[u8]) -> [u8; 64] {
 
 /// Round 1: generate K hyperball commitments.
 ///
+/// # Security
+///
+/// `rng` must never repeat output (no VM snapshot restore, process fork or
+/// fixed seed). If it does, a coordinator can replay the session and obtain
+/// two responses for the same nonce under different challenges, which
+/// reveals this party's partial secret.
+///
 /// Returns:
 /// - `commitment_hash`: 32-byte hash H(tag ‖ tr ‖ id ‖ act ‖ session ‖ μ ‖ `w_packed`)
 /// - `StRound1`: saved state for Round 3
@@ -190,9 +204,11 @@ pub fn round1<R: RngCore + CryptoRng>(
 ) -> Result<([u8; 32], StRound1), Error> {
     let mu = compute_mu(&sk.tr, msg);
 
-    // Hedged nonce derivation:
-    // bind RNG entropy to long-term per-party key and transcript context so
-    // RNG rollback does not trivially re-use nonces across distinct sessions.
+    // Hedged nonce derivation: bind RNG entropy to the long-term per-party key
+    // and transcript context. This does NOT protect against RNG rollback or
+    // repeated output: session_id, act and msg can be replayed by the
+    // coordinator, so a repeated RNG output gives the same y, and two
+    // responses z − z′ = (c − c′)·s₁_I reveal the partial secret.
     let mut rng_entropy = [0u8; 64];
     rng.fill_bytes(&mut rng_entropy);
     let mut rhop = [0u8; 64];
@@ -253,6 +269,7 @@ pub fn round1<R: RngCore + CryptoRng>(
 
         rand_fvecs.push(fv);
     }
+    rhop.zeroize();
 
     let hash = round1_commitment_hash(
         &sk.tr,
@@ -274,7 +291,12 @@ pub fn round1<R: RngCore + CryptoRng>(
 
 /// Round 2: reveal commitments and compute μ.
 ///
-/// Verifies that this party's own reveal is bound to its Round 1 commitment.
+/// Consumes `st_rd1`: a party reveals its Round 1 commitment exactly once, so
+/// it cannot be made to answer a transcript whose peer commitments were chosen
+/// after its own reveal was seen.
+///
+/// Verifies that this party's own reveal is bound to its Round 1 commitment
+/// and that this commitment appears in its own slot of `msgs_rd1`.
 /// NOTE: Per-peer reveal verification is done separately via
 /// `verify_round2_reveal` -- callers in distributed settings MUST
 /// call it for every received reveal.
@@ -287,9 +309,24 @@ pub fn round2(
     session_id: &[u8; 32],
     msgs_rd1: &[[u8; 32]], // commitment hashes from Round 1
     own_rd1_hash: &[u8; 32],
-    st_rd1: &StRound1,
-    _params: &ThresholdParams,
+    st_rd1: StRound1,
+    params: &ThresholdParams,
 ) -> Result<(Vec<u8>, StRound2), Error> {
+    // The transcript must hold exactly one commitment per active party, and
+    // our own slot must hold our own commitment; otherwise the aggregate
+    // could exclude our w and leave the challenge under someone else's control.
+    let active = bitmask_to_sorted_ids(act, params.n);
+    if act >> params.n != 0 || msgs_rd1.len() != active.len() {
+        return Err(Error::InvalidParameters);
+    }
+    let own_idx = active
+        .iter()
+        .position(|&id| id == sk.id)
+        .ok_or(Error::InvalidParameters)?;
+    if !bool::from(msgs_rd1[own_idx].ct_eq(own_rd1_hash)) {
+        return Err(Error::InvalidShare);
+    }
+
     // Concatenate all packed w data for this party's reveal
     let mut reveal_data = Vec::new();
     for packed in &st_rd1.w_packed {
@@ -314,6 +351,8 @@ pub fn round2(
         hashes: msgs_rd1.to_vec(),
         mu,
         act,
+        session_id: *session_id,
+        st1: st_rd1,
     };
 
     Ok((reveal_data, st2))
@@ -370,8 +409,7 @@ pub fn verify_round2_reveal(
 pub fn round3(
     sk: &ThresholdPrivateKey,
     wfinals: &[PolyVecK], // K aggregated commitment vectors
-    st_rd1: StRound1,     // consumed: nonce randomness is single-use
-    st_rd2: &StRound2,    // μ and active set from Round 2
+    st_rd2: StRound2,     // consumed: owns the single-use Round 1 nonce state
     params: &ThresholdParams,
     verified: VerifiedReveals,  // consumed: proof that all reveals were checked
 ) -> Result<Vec<PolyVecL>, Error> {
@@ -390,6 +428,20 @@ pub fn round3(
     }
     if verified.k_reps as usize != k_reps {
         return Err(Error::InvalidParameters);
+    }
+    if !bool::from(verified.session_id.ct_eq(&st_rd2.session_id)) {
+        return Err(Error::InvalidShare);
+    }
+
+    // pack_w_single is only injective on [0, Q): reject non-canonical
+    // coefficients so an aliased aggregate cannot pass the hash check below
+    // while decomposing to a different w₁ (and thus a different challenge).
+    for w in &wfinals[..k_reps] {
+        for p in &w.polys {
+            if p.coeffs.iter().any(|&c| !(0..Q).contains(&c)) {
+                return Err(Error::InvalidParameters);
+            }
+        }
     }
 
     // Ensure the coordinator-supplied aggregates match the reveals that were
@@ -431,7 +483,7 @@ pub fn round3(
     // NOTE: recover_partial_secret returns values ALREADY in NTT domain
     // because Share stores s1h = NTT(s1), so summing them gives NTT(Σ s1)
     // directly. Do NOT NTT again — that would double-transform.
-    let (s1h, s2h) = recover_partial_secret(sk, &partition[party_idx]);
+    let (mut s1h, mut s2h) = recover_partial_secret(sk, &partition[party_idx])?;
     let mut s1h_d = DPolyVecL::default();
     let mut s2h_d = DPolyVecK::default();
     for j in 0..L {
@@ -490,7 +542,13 @@ pub fn round3(
         // Build the full floating response vector and add the sampled
         // hyperball randomness from Round 1 before rejection/rounding.
         let mut zf = FVec::from_polyvecs(&z1, &z2);
-        zf.add_assign(&st_rd1.rand_fvecs[i]);
+        // c·s_I is secret; zf (zeroized on drop) now holds the only copy.
+        z1.zeroize();
+        z2.zeroize();
+        for p in z1_d.vec.iter_mut().chain(z2_d.vec.iter_mut()) {
+            p.coeffs.zeroize();
+        }
+        zf.add_assign(&st_rd2.st1.rand_fvecs[i]);
         if zf.excess(params.r, params.nu) {
             // Rejection: emit zero response
             zs.push(PolyVecL::zero());
@@ -505,6 +563,13 @@ pub fn round3(
         let mut z2_out = PolyVecK::zero();
         zf.round_to_polyvecs(&mut z_out, &mut z2_out);
         zs.push(z_out);
+        z2_out.zeroize();
+    }
+
+    s1h.zeroize();
+    s2h.zeroize();
+    for p in s1h_d.vec.iter_mut().chain(s2h_d.vec.iter_mut()) {
+        p.coeffs.zeroize();
     }
 
     Ok(zs)
@@ -733,19 +798,23 @@ where
 }
 
 /// Recover this party's partial secret from the assigned share bitmasks.
-fn recover_partial_secret(sk: &ThresholdPrivateKey, assigned_masks: &[u8]) -> (PolyVecL, PolyVecK) {
+///
+/// Fails if the partition assigns a share this party does not hold.
+fn recover_partial_secret(
+    sk: &ThresholdPrivateKey,
+    assigned_masks: &[u8],
+) -> Result<(PolyVecL, PolyVecK), Error> {
     let mut s1h = PolyVecL::zero();
     let mut s2h = PolyVecK::zero();
 
     for &mask in assigned_masks {
-        if let Some(share) = sk.shares.get(&mask) {
-            s1h.add_assign(&share.s1h);
-            s2h.add_assign(&share.s2h);
-        }
+        let share = sk.shares.get(&mask).ok_or(Error::InvalidShare)?;
+        s1h.add_assign(&share.s1h);
+        s2h.add_assign(&share.s2h);
     }
     s1h.reduce();
     s2h.reduce();
-    (s1h, s2h)
+    Ok((s1h, s2h))
 }
 
 /// Extract only w1 (`HighBits`) from a `PolyVecK`, skipping the unused w0 copy.
