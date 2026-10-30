@@ -3,7 +3,7 @@
 > **Based on:** FIPS 204 (ML-DSA) + ePrint 2026/013 (Mithril Scheme)
 >
 > This document describes the cryptographic protocol implemented in
-> `threshold-ml-dsa` v0.4.0, covering fresh key generation via Replicated
+> `threshold-ml-dsa` v0.4.1, covering fresh key generation via Replicated
 > Secret Sharing (RSS), Distributed Key Generation (DKG), A Posteriori Key Sharing
 > of existing ML-DSA keys, the 3-round threshold signing protocol with K-parallel
 > hyperball commitments, ML-DSA-65/87 parameters, and FIPS 204-compatible verification.
@@ -437,15 +437,19 @@ coordinates (which correspond to the transmitted z vector).
 
 ### SampleHyperball (Box-Muller)
 
-To sample uniformly on the hyperball surface:
+To sample uniformly inside the ν-scaled hyperball:
 
 1. Generate $d + 2$ Gaussian samples via Box-Muller transform
-2. Scale the first $L \cdot N$ coordinates by $\nu$
-3. Normalize to the unit sphere
-4. Scale by radius $r_1$
+2. Normalize by the norm of all $d + 2$ **unscaled** samples
+3. Scale by radius $r_1$
+4. Multiply the first $L \cdot N$ coordinates by $\nu$
+5. Keep the first $d$ coordinates
 
-This produces a uniformly distributed point on the surface of the ν-scaled
-hyperball, matching the Go reference `SampleHyperball()` function.
+Projecting a uniform point on the $(d+2)$-sphere to $d$ coordinates gives a
+uniform point in the $d$-ball, so the ν-metric norm is $\le r_1$ and in practice
+very close to it. This matches the Go reference `SampleHyperball()` function.
+The norm must be accumulated before the ν scaling; accumulating it afterwards
+(v0.3.1–v0.4.0) shrank samples to ≈0.447·$r_1$ and disabled rejection sampling.
 
 ### K-Parallel Amortization
 

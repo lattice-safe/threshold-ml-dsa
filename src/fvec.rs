@@ -126,10 +126,13 @@ impl FVec {
     }
 }
 
-/// Sample a point uniformly on the hyperball B_{R, ℓ+k}(radius) using
-/// Box-Muller transform for Gaussian direction + radial scaling.
+/// Sample a point uniformly in the ν-scaled hyperball B_{ν}(radius).
 ///
-/// The first L·N coordinates are scaled by ν (expansion factor).
+/// Draws d+2 Gaussians via Box-Muller, normalises by the norm of all d+2
+/// unscaled samples, scales by `radius`, keeps the first d coordinates
+/// (projection of the (d+2)-sphere gives a uniform point in the d-ball),
+/// and multiplies the first L·N coordinates by ν. The result satisfies
+/// ‖(x₁/ν, x₂)‖₂ ≤ radius, with norm ≈ radius in practice.
 ///
 /// This matches the reference Go `SampleHyperball()` in sample.go.
 ///
@@ -193,21 +196,14 @@ pub fn sample_hyperball(out: &mut FVec, radius: f64, nu: f64, rhop: &[u8; 64], n
         let z1 = r * libm::cos(theta);
         let z2 = r * libm::sin(theta);
 
-        // Apply ν scaling to the first L·N coordinates, then accumulate norm
-        // in that scaled space so normalization matches the target geometry.
-        let mut s1 = z1;
-        if idx < N * L {
-            s1 *= nu;
-        }
-        samples[idx] = s1;
-        sq += s1 * s1;
+        // Accumulate the norm of the UNSCALED Gaussian vector (all d+2
+        // samples), matching Go SampleHyperball. ν is applied afterwards so
+        // that ‖(x₁/ν, x₂)‖₂ = radius·‖z[..d]‖/‖z[..d+2]‖ ≤ radius.
+        sq += z1 * z1;
+        sq += z2 * z2;
 
-        let mut s2 = z2;
-        if idx + 1 < N * L {
-            s2 *= nu;
-        }
-        samples[idx + 1] = s2;
-        sq += s2 * s2;
+        samples[idx] = if idx < N * L { z1 * nu } else { z1 };
+        samples[idx + 1] = if idx + 1 < N * L { z2 * nu } else { z2 };
 
         idx += 2;
     }
@@ -223,31 +219,32 @@ pub fn sample_hyperball(out: &mut FVec, radius: f64, nu: f64, rhop: &[u8; 64], n
 mod tests {
     use super::*;
 
-    #[test]
-    fn test_sample_hyperball_radius() {
-        let rhop = [0u8; 64];
-        let mut fv = FVec::zero();
-        sample_hyperball(&mut fv, 252778.0, 3.0, &rhop, 0);
-
-        // The ν-scaled norm should be ≤ radius
-        // ‖(x₁/ν, x₂)‖₂ ≤ r
+    fn nu_norm(fv: &FVec, nu: f64) -> f64 {
         let mut sq = 0.0f64;
-        for i in 0..(L + K) {
-            for j in 0..N {
-                let val = fv.coeffs[i * N + j];
-                if i < L {
-                    sq += val * val / (3.0 * 3.0);
-                } else {
-                    sq += val * val;
-                }
+        for (i, v) in fv.coeffs.iter().enumerate() {
+            sq += if i < L * N { v * v / (nu * nu) } else { v * v };
+        }
+        libm::sqrt(sq)
+    }
+
+    #[test]
+    fn test_sample_hyperball_nu_norm_matches_radius() {
+        // ‖(x₁/ν, x₂)‖₂ must be ≤ radius AND close to it (the norm is
+        // radius·sqrt(χ²_d / χ²_{d+2}) ≈ radius). Accumulating the norm after
+        // ν scaling would give ≈0.447·radius and fail the lower bound.
+        let radius = 252778.0;
+        for seed in 0u8..8 {
+            let rhop = [seed; 64];
+            for nonce in 0..32u16 {
+                let mut fv = FVec::zero();
+                sample_hyperball(&mut fv, radius, 3.0, &rhop, nonce);
+                let n = nu_norm(&fv, 3.0);
+                assert!(n <= radius * (1.0 + 1e-9), "norm {n} > radius");
+                assert!(n >= 0.99 * radius, "norm {n} < 0.99·radius");
+                assert!(!fv.excess(radius * (1.0 + 1e-9), 3.0));
+                assert!(fv.excess(0.99 * radius, 3.0));
             }
         }
-        let norm = libm::sqrt(sq);
-        assert!(
-            norm <= 252778.0 * 1.001, // small tolerance for float precision
-            "Hyperball sample norm {} exceeds radius 252778",
-            norm
-        );
     }
 
     #[test]

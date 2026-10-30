@@ -127,7 +127,33 @@ fn test_hyperball_sampling_norm_bound() {
             "Hyperball sample at nonce {} exceeds radius",
             nonce
         );
+        // ...and close to it (regression: norm accumulated after ν scaling
+        // gave ≈0.447·radius, so rejection sampling never rejected).
+        assert!(
+            fv.excess(0.99 * 252778.0, 3.0),
+            "Hyperball sample at nonce {} is well inside the radius",
+            nonce
+        );
     }
+}
+
+#[test]
+fn test_signing_rejects_at_expected_rate() {
+    // With max_retries = 1, per-attempt success at (2, 2) should be near the
+    // reference rate (≈0.60), not ≈1.0 as with the broken sampler.
+    use rand::rngs::StdRng;
+    use rand::SeedableRng;
+
+    let sdk = ThresholdMlDsa44Sdk::from_seed(&[5u8; 32], 2, 2, 1).unwrap();
+    let mut rng = StdRng::seed_from_u64(2026);
+    let mut ok = 0;
+    for i in 0..100u32 {
+        let msg = i.to_le_bytes();
+        if sdk.threshold_sign(&[0, 1], &msg, &mut rng).is_ok() {
+            ok += 1;
+        }
+    }
+    assert!((20..=85).contains(&ok), "success {ok}/100 outside [20, 85]");
 }
 
 #[test]
