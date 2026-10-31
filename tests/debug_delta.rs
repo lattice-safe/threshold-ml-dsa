@@ -29,7 +29,7 @@ fn trace_one_attempt() {
     for &party_id in &active {
         let sk = sdk.party_key(party_id as usize).unwrap();
         let (hash, st1) =
-            threshold_ml_dsa::sign::round1(sk, sdk.params(), act, msg, &session_id, &mut rng)
+            threshold_ml_dsa::sign::round1(sk, sdk.params(), act, msg, &session_id, &mut rng, &mut threshold_ml_dsa::nonce::InMemoryNonceGuard::new())
                 .unwrap();
         rd1_hashes.push(hash);
         rd1_states.push(st1);

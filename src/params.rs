@@ -164,6 +164,25 @@ pub struct ThresholdParams {
     pub nu: f64,
 }
 
+impl ThresholdParams {
+    /// Check that these parameters are exactly the canonical set for (T, N).
+    ///
+    /// The fields are public, so callers can build arbitrary values; a radius
+    /// of NaN or +∞ would disable hyperball rejection and release every
+    /// response. Protocol entry points call this before using `self`.
+    pub fn validate(&self) -> Result<(), crate::error::Error> {
+        let canon = get_threshold_params(self.t, self.n).ok_or(crate::error::Error::InvalidParameters)?;
+        if self.k_reps != canon.k_reps
+            || self.r.to_bits() != canon.r.to_bits()
+            || self.r1.to_bits() != canon.r1.to_bits()
+            || self.nu.to_bits() != canon.nu.to_bits()
+        {
+            return Err(crate::error::Error::InvalidParameters);
+        }
+        Ok(())
+    }
+}
+
 /// Lookup the paper parameters for a given (T, N) pair.
 ///
 /// Returns `None` if (T, N) is not in the supported range

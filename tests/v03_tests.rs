@@ -144,7 +144,7 @@ fn test_signing_rejects_at_expected_rate() {
     use rand::rngs::StdRng;
     use rand::SeedableRng;
 
-    let sdk = ThresholdMlDsa44Sdk::from_seed(&[5u8; 32], 2, 2, 1).unwrap();
+    let mut sdk = ThresholdMlDsa44Sdk::from_seed(&[5u8; 32], 2, 2, 1).unwrap();
     let mut rng = StdRng::seed_from_u64(2026);
     let mut ok = 0;
     for i in 0..100u32 {
@@ -190,7 +190,7 @@ fn test_end_to_end_threshold_sign_2_2() {
     use rand::SeedableRng;
 
     let seed = [42u8; 32];
-    let sdk = ThresholdMlDsa44Sdk::from_seed(&seed, 2, 2, 64).unwrap();
+    let mut sdk = ThresholdMlDsa44Sdk::from_seed(&seed, 2, 2, 64).unwrap();
 
     let mut rng = StdRng::seed_from_u64(12345);
     let msg = b"Hello, threshold ML-DSA!";
@@ -212,7 +212,7 @@ fn test_end_to_end_threshold_sign_2_3() {
     use rand::SeedableRng;
 
     let seed = [7u8; 32];
-    let sdk = ThresholdMlDsa44Sdk::from_seed(&seed, 2, 3, 64).unwrap();
+    let mut sdk = ThresholdMlDsa44Sdk::from_seed(&seed, 2, 3, 64).unwrap();
 
     let mut rng = StdRng::seed_from_u64(99999);
     let msg = b"threshold 2-of-3 test";
@@ -233,7 +233,7 @@ fn test_end_to_end_threshold_sign_4_6() {
     use rand::SeedableRng;
 
     let seed = [46u8; 32];
-    let sdk = ThresholdMlDsa44Sdk::from_seed(&seed, 4, 6, 32).unwrap();
+    let mut sdk = ThresholdMlDsa44Sdk::from_seed(&seed, 4, 6, 32).unwrap();
 
     let mut rng = StdRng::seed_from_u64(464646);
     let msg = b"threshold 4-of-6 test";
@@ -255,7 +255,7 @@ fn test_end_to_end_threshold_sign_5_6() {
     use rand::SeedableRng;
 
     let seed = [56u8; 32];
-    let sdk = ThresholdMlDsa44Sdk::from_seed(&seed, 5, 6, 32).unwrap();
+    let mut sdk = ThresholdMlDsa44Sdk::from_seed(&seed, 5, 6, 32).unwrap();
 
     let mut rng = StdRng::seed_from_u64(565656);
     let msg = b"threshold 5-of-6 test with extremely large sub-shares";
@@ -276,7 +276,7 @@ fn test_end_to_end_threshold_sign_3_3() {
     use rand::SeedableRng;
 
     let seed = [33u8; 32];
-    let sdk = ThresholdMlDsa44Sdk::from_seed(&seed, 3, 3, 64).unwrap();
+    let mut sdk = ThresholdMlDsa44Sdk::from_seed(&seed, 3, 3, 64).unwrap();
 
     let mut rng = StdRng::seed_from_u64(333333);
     let msg = b"threshold 3-of-3 all parties must sign";
@@ -297,7 +297,7 @@ fn test_end_to_end_threshold_sign_3_4() {
     use rand::SeedableRng;
 
     let seed = [34u8; 32];
-    let sdk = ThresholdMlDsa44Sdk::from_seed(&seed, 3, 4, 64).unwrap();
+    let mut sdk = ThresholdMlDsa44Sdk::from_seed(&seed, 3, 4, 64).unwrap();
 
     let mut rng = StdRng::seed_from_u64(343434);
     let msg = b"threshold 3-of-4 partial quorum test";

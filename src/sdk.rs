@@ -9,6 +9,7 @@ use alloc::vec::Vec;
 use std::vec::Vec;
 
 use crate::error::Error;
+use crate::nonce::InMemoryNonceGuard;
 use crate::params::{PK_BYTES, ThresholdParams, get_threshold_params, SIG_BYTES};
 use crate::poly::{PolyVecK, PolyVecL};
 use crate::rss;
@@ -35,6 +36,8 @@ pub struct ThresholdMlDsa44Sdk {
     pub(crate) params: ThresholdParams,
     /// Maximum full-protocol retries
     pub(crate) max_retries: usize,
+    /// Round 1 nonce guard shared by all in-process parties
+    pub(crate) guard: InMemoryNonceGuard,
 }
 
 impl ThresholdMlDsa44Sdk {
@@ -85,6 +88,7 @@ impl ThresholdMlDsa44Sdk {
             sks,
             params,
             max_retries,
+            guard: InMemoryNonceGuard::new(),
         })
     }
 
@@ -93,7 +97,7 @@ impl ThresholdMlDsa44Sdk {
     /// **Insecure** (requires the `insecure-keygen` feature): the shares
     /// leak the original secret to coalitions smaller than T.
     #[cfg(feature = "insecure-keygen")]
-    pub fn from_existing_key(
+    pub fn insecure_from_existing_key(
         sk_bytes: &[u8],
         seed: &[u8; 32],
         t: u8,
@@ -106,43 +110,54 @@ impl ThresholdMlDsa44Sdk {
             return Err(Error::InvalidParameters);
         }
 
-        let (pk, sks) = crate::aposteriori::share_existing_key(sk_bytes, seed, &params)?;
+        let (pk, sks) = crate::aposteriori::insecure_share_existing_key(sk_bytes, seed, &params)?;
 
         Ok(Self {
             pk,
             sks,
             params,
             max_retries,
+            guard: InMemoryNonceGuard::new(),
         })
     }
 
-    /// Create a threshold SDK from DKG contributions and commitments.
+    /// Create an SDK from existing party keys (e.g. the outputs of
+    /// [`crate::dkg`] or keys parsed with
+    /// [`rss::ThresholdPrivateKey::from_bytes`]).
     ///
-    /// **Insecure** (requires the `insecure-keygen` feature): the master seed
-    /// is derived from publicly revealed contributions, so every participant
-    /// and any observer of the broadcast can derive the full secret key.
-    #[cfg(feature = "insecure-keygen")]
-    pub fn from_dkg(
-        contributions: &[(u8, crate::dkg::DkgContribution)],
-        commitments: &[(u8, [u8; 32])],
-        t: u8,
-        n: u8,
+    /// `sks` must hold exactly one key for each party ID `0..N`, all for the
+    /// same (T, N) and public key. Note that holding every party's key in one
+    /// process means this process can sign alone.
+    pub fn from_party_keys(
+        pk: [u8; PK_BYTES],
+        mut sks: Vec<rss::ThresholdPrivateKey>,
         max_retries: usize,
     ) -> Result<Self, Error> {
-        let params = get_threshold_params(t, n).ok_or(Error::InvalidParameters)?;
-
-        if max_retries == 0 {
+        if max_retries == 0 || sks.is_empty() {
             return Err(Error::InvalidParameters);
         }
-
-        let master_seed = crate::dkg::dkg_round2(n, contributions, commitments)?;
-        let (pk, sks) = crate::dkg::dkg_finalize(&master_seed, &params)?;
-
+        let (t, n) = sks[0].threshold();
+        let params = get_threshold_params(t, n).ok_or(Error::InvalidParameters)?;
+        if sks.len() != n as usize {
+            return Err(Error::InvalidParameters);
+        }
+        sks.sort_by_key(rss::ThresholdPrivateKey::id);
+        let tr = rss::tr_from_pk(&pk);
+        for (i, sk) in sks.iter().enumerate() {
+            if sk.id() as usize != i
+                || sk.threshold() != (t, n)
+                || sk.rho != pk[..32]
+                || sk.tr != tr
+            {
+                return Err(Error::InvalidShare);
+            }
+        }
         Ok(Self {
             pk,
             sks,
             params,
             max_retries,
+            guard: InMemoryNonceGuard::new(),
         })
     }
 
@@ -156,7 +171,7 @@ impl ThresholdMlDsa44Sdk {
     /// # Returns
     /// A valid FIPS 204 signature on success.
     pub fn threshold_sign<R: RngCore + CryptoRng>(
-        &self,
+        &mut self,
         active: &[u8],
         msg: &[u8],
         rng: &mut R,
@@ -209,7 +224,8 @@ impl ThresholdMlDsa44Sdk {
             for &party_id in active {
                 let sk = &self.sks[party_id as usize];
                 // Clone rng bytes for each party (in production, each party has its own RNG)
-                let (hash, st1) = sign::round1(sk, &self.params, act, msg, &session_id, rng)?;
+                let (hash, st1) =
+                    sign::round1(sk, &self.params, act, msg, &session_id, rng, &mut self.guard)?;
                 rd1_hashes.push(hash);
                 rd1_states.push(st1);
             }
@@ -353,7 +369,7 @@ mod tests {
         use rand::SeedableRng;
 
         let seed = [99u8; 32];
-        let sdk = ThresholdMlDsa44Sdk::from_seed(&seed, 2, 3, 2).unwrap();
+        let mut sdk = ThresholdMlDsa44Sdk::from_seed(&seed, 2, 3, 2).unwrap();
         let mut rng = StdRng::seed_from_u64(1);
         let msg = b"active set validation";
 

@@ -10,9 +10,10 @@ A `#![no_std]`-compatible Rust implementation of threshold ML-DSA based on the M
 
 > **Security notice (v0.5.0).** Versions 0.3.1–0.4.0 had a hyperball sampler
 > bug that disabled rejection sampling; upgrade and consider rotating keys used
-> with them. Since 0.5.0 the `dkg` and `aposteriori` modules are behind the
-> non-default `insecure-keygen` feature because they do not provide threshold
-> security, and only N ≤ 6 is supported. See [CHANGELOG.md](CHANGELOG.md).
+> with them. 0.5.0 replaces the old DKG (which gave every party the full key)
+> with a real one, moves a posteriori sharing behind the non-default
+> `insecure-keygen` feature, and supports only N ≤ 6. See
+> [CHANGELOG.md](CHANGELOG.md).
 
 ---
 
@@ -49,7 +50,7 @@ Standard threshold signature schemes based on Shamir secret sharing introduce la
          │                      │                      │
          │             ┌────────▼────────┐    ┌────────▼────────┐
          │             │  aposteriori.rs │    │    dkg.rs       │
-         │             │ Existing key    │    │ 2-round DKG     │
+         │             │ (insecure)      │    │ 4-round DKG     │
          │             │ sharing (§4.2)  │    │ protocol (§4.3) │
          │             └────────┬────────┘    └────────┬────────┘
          │                      │                      │
@@ -94,19 +95,48 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
-### Insecure key setups (`insecure-keygen` feature)
+### 2. Distributed Key Generation (no trusted dealer)
 
-`dkg` / `from_dkg` and `aposteriori` / `from_existing_key` are only compiled
-with the non-default `insecure-keygen` feature. They are kept for testing and
-interoperability experiments and **must not be used to protect real keys**:
+Each party runs its own `DkgParty`. Broadcast messages need an authenticated
+channel; `DkgSeedMsg` is secret and must go over an authenticated, encrypted
+point-to-point channel to its recipient. No party ever holds a subset secret
+it is not a member of.
 
-- The DKG derives the master seed from contributions that every party reveals,
-  so every participant (and anyone who sees the broadcast) can derive the full
-  secret key.
-- A posteriori sharing gives the last subset `s − Σ others`, which leaks
-  information about the original secret to coalitions smaller than T.
+```rust
+use threshold_ml_dsa::dkg::{DkgConfig, DkgParty};
+use threshold_ml_dsa::nonce::InMemoryNonceGuard;
 
-Use `from_seed` with a trusted dealer instead.
+// On party `me`, with `transport` your networking layer:
+let (party, r0) = DkgParty::start(DkgConfig { t, n, me, context }, &mut rng)?;
+let all_r0 = transport.broadcast(r0);
+let (party, commit, seed_msgs) = party.round1(&all_r0, &mut rng)?;
+let all_commits = transport.broadcast(commit);
+let my_seeds = transport.send_private(seed_msgs); // encrypted, per recipient
+let (party, reveal) = party.round2(&all_commits, my_seeds)?;
+let all_reveals = transport.broadcast(reveal);
+let (party, confirm) = party.round3(&all_reveals)?;
+let all_confirms = transport.broadcast(confirm);
+let (pk, my_key) = party.finalize(&all_confirms)?;
+let stored = my_key.to_bytes()?; // protect at rest
+```
+
+`dkg::simulate` runs all parties in one process for tests.
+
+### Insecure: sharing an existing key (`insecure-keygen` feature)
+
+`aposteriori::insecure_share_existing_key` / `insecure_from_existing_key`
+split an existing ML-DSA-44 key. Because shares must be short, this cannot
+hide the original secret: coalitions smaller than T learn part of it. It is
+kept for testing and interoperability experiments only.
+
+### Nonce safety
+
+`sign::round1` takes a `NonceGuard`. It refuses a repeated session ID per key
+and mixes a strictly increasing counter into the nonce seed, so a repeated
+RNG output alone cannot reuse a nonce (which would reveal the party's partial
+secret). `InMemoryNonceGuard` is not durable; persist its counter or implement
+`NonceGuard` over durable storage. Rolling back the RNG and the guard state
+together (e.g. a VM snapshot) is not protected against.
 
 ---
 
@@ -188,10 +218,11 @@ cargo bench --bench benchmarks -- --nocapture
 | `partition` | Algorithm 6 (`RSSRecover`) for $N \le 6$ |
 | `rss` | `keygen_from_seed()`: fresh independent secrets per subset (Figure 4) |
 | `aposteriori` | **Insecure**, `insecure-keygen` only: split an existing ML-DSA-44 secret key |
-| `dkg` | **Insecure**, `insecure-keygen` only: every party learns the full key |
+| `dkg` | Distributed key generation: per-subset dealing, commit/reveal, confirm round |
+| `nonce` | `NonceGuard` / `InMemoryNonceGuard`: Round 1 nonce-reuse protection |
 | `sign` | 3-round party protocol: K-parallel commit, reveal, respond |
 | `coordinator` | K-parallel `Combine`: $\delta$-norm check, hint generation, FIPS 204 packing |
-| `sdk` | High-level API: `from_seed()`, `threshold_sign()`, `verify()` (plus insecure `from_dkg()` / `from_existing_key()` behind `insecure-keygen`) |
+| `sdk` | High-level API: `from_seed()`, `from_party_keys()`, `threshold_sign()`, `verify()` (plus `insecure_from_existing_key()` behind `insecure-keygen`) |
 | `verify` | Standard FIPS 204 verification via `dilithium-rs` (ML-DSA-44, ML-DSA-65, ML-DSA-87) |
 | `error` | `no_std`-compatible error handling |
 
@@ -203,7 +234,7 @@ cargo bench --bench benchmarks -- --nocapture
 # Run complete test suite
 cargo test --release
 
-# Include the insecure-keygen integration suite (DKG + A Posteriori)
+# Include the insecure a posteriori sharing tests
 cargo test --release --features insecure-keygen
 
 # Security regression tests
@@ -223,7 +254,7 @@ cargo test --test v03_tests
 - **Cryptographic Reveal Witness**: `verify_all_round2_reveals()` returns a bound witness token that `round3()` requires, enforcing round ordering.
 - **Hedged Nonce Generation**: Round 1 binds PRNG entropy + long-term key + transcript context + party ID. This does **not** protect against RNG rollback or repeated output (VM snapshots, forks): a repeated nonce reveals the party's partial secret. Each party's RNG must never repeat.
 - **Fail-Closed SDK**: Output signatures are verified by the pure-Rust `dilithium-rs` FIPS 204 verifier before returning to caller.
-- **Zeroize-on-Drop**: `FVec`, `StRound1`, `StRound2`, `ThresholdPrivateKey`, and `Share` implement `Zeroize` and `Drop`.
+- **Zeroize-on-Drop (best effort)**: `FVec`, `StRound1`, `StRound2`, `ThresholdPrivateKey`, and `Share` implement `Zeroize` and `Drop`; nonce and secret intermediates are wiped explicitly. Copies inside `sha3` state and moved stack values are not wiped.
 - **100% Safe Rust**: Zero `unsafe` blocks across the codebase.
 
 ---

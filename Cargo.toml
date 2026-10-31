@@ -13,7 +13,7 @@ exclude = ["scratch_test.rs", "fuzz/", "target/"]
 
 [dependencies]
 rand_core = { version = "0.6", default-features = false }
-zeroize = { version = "1", default-features = false, features = ["derive"] }
+zeroize = { version = "1", default-features = false, features = ["derive", "alloc"] }
 sha3 = { version = "0.10", default-features = false }
 subtle = { version = "2", default-features = false }
 libm = "0.2"
@@ -28,16 +28,11 @@ rand = "0.8"
 [features]
 default = ["std"]
 std = []
-# Exposes `dkg` and `aposteriori`, which DO NOT provide threshold security:
-# the DKG gives every participant (and any observer) the full secret key, and
-# a posteriori sharing leaks the original secret to sub-threshold coalitions.
+# Exposes `aposteriori`, which DOES NOT provide threshold security: sharing
+# an existing key leaks the original secret to sub-threshold coalitions.
 # For testing and interoperability experiments only.
 insecure-keygen = []
 
 [[bench]]
 name = "benchmarks"
 harness = false
-
-[[test]]
-name = "dkg_sign_verify_full_coverage"
-required-features = ["insecure-keygen"]

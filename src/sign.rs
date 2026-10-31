@@ -21,6 +21,7 @@ use alloc::vec::Vec;
 
 use crate::error::Error;
 use crate::fvec::{sample_hyperball, FVec};
+use crate::nonce::NonceGuard;
 use crate::params::{CTILDEBYTES, MAX_PARTIES, TRBYTES, ThresholdParams, K, L, N, Q};
 use crate::partition;
 use crate::poly::{Poly, PolyVecK, PolyVecL};
@@ -184,42 +185,52 @@ pub fn compute_mu(tr: &[u8; TRBYTES], msg: &[u8]) -> [u8; 64] {
 ///
 /// # Security
 ///
-/// `rng` must never repeat output (no VM snapshot restore, process fork or
-/// fixed seed). If it does, a coordinator can replay the session and obtain
-/// two responses for the same nonce under different challenges, which
-/// reveals this party's partial secret.
+/// `guard` reserves `session_id` before any randomness is drawn and refuses
+/// a session ID already used with this key; its counter is mixed into the
+/// nonce seed, so a repeated RNG output alone cannot reproduce a nonce.
+/// Reusing a nonce under two challenges would reveal this party's partial
+/// secret. See [`crate::nonce`] for what a guard cannot protect against.
 ///
 /// Returns:
 /// - `commitment_hash`: 32-byte hash H(tag ‖ tr ‖ id ‖ act ‖ session ‖ μ ‖ `w_packed`)
 /// - `StRound1`: saved state for Round 3
 ///
 /// This matches the Go `Round1()` function.
-pub fn round1<R: RngCore + CryptoRng>(
+pub fn round1<R: RngCore + CryptoRng, G: NonceGuard + ?Sized>(
     sk: &ThresholdPrivateKey,
     params: &ThresholdParams,
     act: u8,
     msg: &[u8],
     session_id: &[u8; 32],
     rng: &mut R,
+    guard: &mut G,
 ) -> Result<([u8; 32], StRound1), Error> {
+    params.validate()?;
+    if (sk.t, sk.n) != (params.t, params.n) {
+        return Err(Error::InvalidParameters);
+    }
+    if sk.id >= params.n || act >> params.n != 0 || act & (1 << sk.id) == 0 {
+        return Err(Error::InvalidParameters);
+    }
+    // Reserve the session before drawing randomness: a replayed session ID
+    // is refused, and the counter makes every nonce seed input distinct.
+    let counter = guard.reserve(&sk.guard_key_id(), session_id)?;
     let mu = compute_mu(&sk.tr, msg);
 
-    // Hedged nonce derivation: bind RNG entropy to the long-term per-party key
-    // and transcript context. This does NOT protect against RNG rollback or
-    // repeated output: session_id, act and msg can be replayed by the
-    // coordinator, so a repeated RNG output gives the same y, and two
-    // responses z − z′ = (c − c′)·s₁_I reveal the partial secret.
+    // Hedged nonce derivation: bind RNG entropy to the long-term per-party
+    // key, transcript context and the guard counter.
     let mut rng_entropy = [0u8; 64];
     rng.fill_bytes(&mut rng_entropy);
     let mut rhop = [0u8; 64];
     let mut rhop_h = Shake256::default();
-    rhop_h.update(b"th-ml-dsa-round1-rhop-v1");
+    rhop_h.update(b"th-ml-dsa-round1-rhop-v2");
     rhop_h.update(&rng_entropy);
     rhop_h.update(&sk.key);
     rhop_h.update(&sk.tr);
     rhop_h.update(&[sk.id, act]);
     rhop_h.update(session_id);
     rhop_h.update(&mu);
+    rhop_h.update(&counter.to_le_bytes());
     rhop_h.finalize_xof().read(&mut rhop);
     rng_entropy.zeroize();
 
@@ -268,6 +279,10 @@ pub fn round1<R: RngCore + CryptoRng>(
         w_packed_all.push(packed);
 
         rand_fvecs.push(fv);
+        // y is the integer nonce: with an accepted z it gives c·s_I = z − y.
+        y.zeroize();
+        e_.zeroize();
+        yh.zeroize();
     }
     rhop.zeroize();
 
@@ -312,6 +327,7 @@ pub fn round2(
     st_rd1: StRound1,
     params: &ThresholdParams,
 ) -> Result<(Vec<u8>, StRound2), Error> {
+    params.validate()?;
     // The transcript must hold exactly one commitment per active party, and
     // our own slot must hold our own commitment; otherwise the aggregate
     // could exclude our w and leave the challenge under someone else's control.
@@ -419,6 +435,10 @@ pub fn round3(
         ML_DSA_44,
     };
 
+    params.validate()?;
+    if (sk.t, sk.n) != (params.t, params.n) || st_rd2.act >> params.n != 0 {
+        return Err(Error::InvalidParameters);
+    }
     let k_reps = params.k_reps as usize;
     let mode = ML_DSA_44;
 

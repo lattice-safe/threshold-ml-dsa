@@ -82,9 +82,17 @@ and advanced distributed orchestration.
 > When using low-level rounds, callers must enforce per-peer Round-2 reveal checks
 > and authenticated/replay-protected transport.
 
+### `ThresholdMlDsa44Sdk::from_party_keys(pk, sks, max_retries)`
+
+Build an SDK from existing party keys, e.g. from `dkg::simulate` or parsed
+with `ThresholdPrivateKey::from_bytes`. All N keys must be for the same
+(T, N) and public key.
+
 ### `sdk.threshold_sign(active, msg, rng)`
 
 Perform a full 3-round threshold signing protocol with K parallel repetitions.
+Takes `&mut self`: the SDK keeps an `InMemoryNonceGuard` that refuses a
+repeated Round 1 session and mixes a counter into every nonce.
 
 **Parameters:**
 - `active: &[u8]` — sorted list of T active signer IDs
@@ -108,7 +116,7 @@ Verify a signature using the standard ML-DSA-44 verifier.
 ```
 from_seed(seed, T, N)
   └── rss::keygen_from_seed()
-       ├── Derive ρ, per-party keys from SHAKE-256(seed)
+       ├── Derive ρ, per-party keys from SHAKE-256(seed ‖ K ‖ L) (matches Go)
        ├── For each (N-T+1)-subset (Gosper's hack):
        │     sample s_I ← χ_s independently
        ├── Compute s_total = Σ s_I

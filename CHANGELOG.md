@@ -6,14 +6,24 @@ Security fixes from an internal review. This release has breaking API changes.
 
 ### Security
 
-- **DKG and a posteriori sharing are now behind the non-default
-  `insecure-keygen` feature.** The DKG derived the master seed from
-  contributions that every party reveals, so every participant (and any
-  observer of the broadcast) could derive the full secret key. A posteriori
-  sharing gave the last subset `s − Σ others`, so coalitions smaller than T
-  learn `s − s_M` for a short `s_M`, which leaks the original secret.
-  Keys created with `from_dkg` or `from_existing_key` should be treated as
-  compromised and replaced with keys from `from_seed`.
+- **New DKG.** The old DKG derived the master seed from contributions that
+  every party reveals, so every participant (and any observer of the
+  broadcast) could derive the full secret key. `dkg` now deals each subset
+  secret from one of its own members, privately to the other members, with
+  commit/reveal of `t_I` and a confirmation round against equivocation. No
+  party receives a subset secret it is not a member of. `dkg_round1/2`,
+  `dkg_finalize`, `DkgContribution` and `from_dkg` are removed. **Keys created
+  with the old `from_dkg` must be treated as compromised.**
+- **A posteriori sharing is behind the non-default `insecure-keygen` feature**
+  and renamed `insecure_share_existing_key` / `insecure_from_existing_key`.
+  Short shares cannot hide a pre-existing short secret: coalitions smaller
+  than T learn part of it. **Keys shared with `from_existing_key` must be
+  treated as compromised.** It now also rejects malformed secret keys
+  (coefficients outside `[-η, η]`, mismatched `tr`).
+- **Nonce-reuse protection.** `round1` takes a `NonceGuard` that refuses a
+  repeated session ID per key and mixes a strictly increasing counter into the
+  nonce seed. Previously a repeated RNG output let a coordinator replay a
+  session and recover the party's partial secret from two responses.
 - **N = 7, 8 removed** (`MAX_PARTIES` is now 6). Their parameters were not
   derived from the paper's formulas, and their radii are 0.46–0.90 of what the
   rejection-sampling bound requires.
@@ -26,28 +36,56 @@ Security fixes from an internal review. This release has breaking API changes.
 - **`round3` rejects non-canonical aggregate commitments.** `pack_w_single` is
   not injective outside `[0, q)`, so a coordinator could send an aggregate that
   passes the hash binding but decomposes to a different challenge.
+- **Parameters are validated.** `ThresholdParams` fields are public; a radius
+  of NaN or ∞ disabled rejection and released every response. `round1/2/3`,
+  `combine` and a posteriori sharing now require the canonical parameters for
+  (T, N), and keys record their (T, N) and refuse other parameters.
 - `round3` checks that the reveal witness has the same session ID as Round 2,
   and fails if the partition assigns a share the party does not hold.
-- Secrets are wiped in more places: the Round 1 nonce seed, `c·s_I`
-  intermediates and the partial secret in Round 3, and the full secret totals
-  in keygen. `Poly`'s `Debug` no longer prints a coefficient.
-- Documented that the hedged nonce derivation does not protect against RNG
-  rollback or repeated output: a repeated nonce reveals the partial secret.
+- `verify*` return `false` for a wrong-length public key instead of
+  panicking; `sign_standard*` check the secret key length and return code.
+- The coordinator rejects party commitments and responses outside `[0, q)`
+  (previously i32 overflow), and `Signature::to_bytes` checks field lengths
+  instead of panicking.
+- Secrets are wiped in more places: Round 1 nonce seed and integer nonce,
+  Gaussian buffers in `sample_hyperball`, `c·s_I` intermediates and the
+  partial secret in Round 3, keygen totals and a posteriori intermediates.
+  `ThresholdPrivateKey` is no longer `Clone`; `keygen*` return the secret key
+  in `Zeroizing`. `Poly`'s `Debug` no longer prints a coefficient.
+
+### Added
+
+- `ThresholdPrivateKey::{to_bytes, from_bytes}`: versioned, validated key
+  serialization so each party can hold only its own key.
+- `ThresholdMlDsa44Sdk::from_party_keys` to build an SDK from DKG or parsed keys.
+- `nonce::{NonceGuard, InMemoryNonceGuard}`, `ThresholdPrivateKey::guard_key_id`.
+- `dkg::simulate` to run a whole DKG in one process (tests, benchmarks).
+- `ThresholdParams::validate`, `ThresholdPrivateKey::threshold`.
 
 ### Fixed
 
+- `keygen_from_seed` now absorbs `[K, L]` after the seed, as the Go reference
+  and FIPS 204 do; keys match the Go reference byte for byte (test vectors in
+  `tests/security_regressions.rs`). **Keys derived from a given seed differ
+  from 0.4.x.**
 - `Poly::uniform_eta` and `MatrixA::expand` now match FIPS 204 `ExpandS` and
   `ExpandA` (previously uniform but not FIPS-identical). `Poly::pack_z` centers
   coefficients first. These are not used by the signing protocol.
+- Documentation no longer claims the DKG and a posteriori sharing implement
+  ePrint 2026/013 §4.3/§4.2 (not verified), or "production-grade" status.
 
 ### Changed (breaking)
 
+- `sign::round1(.., rng, guard)` takes a `NonceGuard`.
 - `sign::round2(.., st_rd1: StRound1, ..)` takes the Round 1 state by value.
 - `sign::round3(sk, wfinals, st_rd2: StRound2, params, verified)` takes the
   Round 2 state by value and no longer takes `StRound1`.
+- `ThresholdMlDsa44Sdk::threshold_sign` takes `&mut self`.
 - `get_threshold_params` returns `None` for N > 6.
-- `dkg`, `aposteriori`, `from_dkg` and `from_existing_key` require the
-  `insecure-keygen` feature.
+- `Error` is `#[non_exhaustive]` and has new variants.
+- `verify::sign_standard*` return `Result`; `verify::keygen*` return the
+  secret key as `Zeroizing<Vec<u8>>`; `Signature::to_bytes` returns `Result`.
+- Round 1 commitments and nonces use new domain tags (`-v2`).
 
 ## [0.4.1] - 2026-10-31
 

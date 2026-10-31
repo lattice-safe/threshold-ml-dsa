@@ -1,8 +1,21 @@
-//! A Posteriori Key Sharing for Threshold ML-DSA.
+//! **Insecure** a posteriori key sharing (feature `insecure-keygen`).
 //!
-//! Implements ePrint 2026/013 §4.2: converting an existing, standard ML-DSA-44
-//! secret key into threshold Replicated Secret Sharing (RSS) key material
-//! while preserving the original public key.
+//! Converts an existing, standard ML-DSA-44 secret key into threshold
+//! Replicated Secret Sharing (RSS) key material while preserving the original
+//! public key. This has not been checked against ePrint 2026/013 §4.2.
+//!
+//! ## Why this is insecure
+//!
+//! Signing needs short partial secrets, so the shares must be short
+//! integers. Then sharing a fixed, pre-existing short `s` cannot hide it:
+//! the T−1 parties outside a subset `J` see every share except `s_J` and so
+//! learn `d = s − s_J`; for a perfectly hiding scheme both `d` and `s_J`
+//! (seen by any single member of `J`) would have to be independent of `s`,
+//! which is impossible for bounded shares. With η = 2 a coalition learns
+//! about 0.7 bits per coefficient and the exact value of about 8% of
+//! coefficients. The remainder share is also not η-short, which breaks the
+//! norm assumption behind hyperball rejection. Use fresh keys
+//! ([`crate::rss::keygen_from_seed`] or [`crate::dkg`]) instead.
 //!
 //! ## Protocol Overview
 //!
@@ -27,13 +40,19 @@ use crate::params::{
 };
 use crate::poly::{PolyVecK, PolyVecL};
 use crate::rss::{compute_public_key, sample_leq_eta, Share, ThresholdPrivateKey};
+use crate::params::ETA;
 use sha3::digest::{ExtendableOutput, Update, XofReader};
 use sha3::Shake256;
+use subtle::ConstantTimeEq;
+use zeroize::Zeroize;
 
 /// Decompose an existing ML-DSA-44 secret key into threshold RSS private keys.
 ///
+/// **Insecure**: leaks the original secret to coalitions smaller than T (see
+/// the module documentation).
+///
 /// # Arguments
-/// * `sk_bytes` — Packed ML-DSA-44 secret key (`SK_BYTES` = 2592 bytes).
+/// * `sk_bytes` — Packed ML-DSA-44 secret key (`SK_BYTES` = 2560 bytes).
 /// * `seed` — 32-byte seed for generating non-remainder subset shares.
 /// * `params` — Threshold parameters (T, N).
 ///
@@ -43,7 +62,7 @@ use sha3::Shake256;
 ///
 /// # Errors
 /// Returns `Error::InvalidParameters` if `sk_bytes` length is invalid or `params` are out of range.
-pub fn share_existing_key(
+pub fn insecure_share_existing_key(
     sk_bytes: &[u8],
     seed: &[u8; 32],
     params: &ThresholdParams,
@@ -51,6 +70,7 @@ pub fn share_existing_key(
     if sk_bytes.len() != SK_BYTES {
         return Err(Error::InvalidParameters);
     }
+    params.validate()?;
     let n = params.n;
     let t = params.t;
     if !(t >= 2 && t <= n) || (n as usize) > MAX_PARTIES {
@@ -98,6 +118,12 @@ pub fn share_existing_key(
         }
     }
 
+    // Reject malformed keys: s₁, s₂ must be η-short.
+    let eta = ETA as i32;
+    if s1_orig.polys.iter().chain(s2_orig.polys.iter()).any(|p| p.coeffs.iter().any(|&c| !(-eta..=eta).contains(&c))) {
+        return Err(Error::InvalidParameters);
+    }
+
     // Expand randomness seed for generating non-remainder subset shares
     let mut h = Shake256::default();
     h.update(b"th-ml-dsa-aposteriori-v1");
@@ -111,6 +137,8 @@ pub fn share_existing_key(
         let mut pkey = [0u8; 32];
         reader.read(&mut pkey);
         sks.push(ThresholdPrivateKey {
+            t: params.t,
+            n: params.n,
             id: i,
             rho,
             key: pkey,
@@ -228,8 +256,23 @@ pub fn share_existing_key(
     let mut tr_reader = h_tr.finalize_xof();
     tr_reader.read(&mut tr);
 
+    // The key's stored tr must match the recomputed public key.
+    if !bool::from(tr.ct_eq(&tr_orig)) {
+        return Err(Error::InvalidParameters);
+    }
+
     for sk in &mut sks {
         sk.tr = tr;
+    }
+
+    s1_orig.zeroize();
+    s2_orig.zeroize();
+    s1_orig_ntt.zeroize();
+    s1_acc.zeroize();
+    s2_acc.zeroize();
+    key_orig.zeroize();
+    for p in s1_d.vec.iter_mut().chain(s2_d.vec.iter_mut()).chain(t0_d.vec.iter_mut()) {
+        p.coeffs.zeroize();
     }
 
     Ok((pk_bytes, sks))
@@ -249,7 +292,7 @@ mod tests {
         sk_fixed.copy_from_slice(&sk_bytes);
 
         let params = get_threshold_params(2, 3).unwrap();
-        let (th_pk, sks) = share_existing_key(&sk_fixed, &[99u8; 32], &params).unwrap();
+        let (th_pk, sks) = insecure_share_existing_key(&sk_fixed, &[99u8; 32], &params).unwrap();
 
         // The derived public key from a posteriori sharing MUST match the original pk
         assert_eq!(th_pk, pk_bytes[..PK_BYTES]);
@@ -257,7 +300,7 @@ mod tests {
 
         // Sign a message using standard ML-DSA to ensure keypair is valid
         let msg = b"A posteriori key sharing verification test";
-        let std_sig = verify::sign_standard(msg, &sk_fixed, &[1u8; 32]);
+        let std_sig = verify::sign_standard(msg, &sk_fixed, &[1u8; 32]).unwrap();
         assert!(verify::verify(&std_sig, msg, &th_pk));
     }
 
@@ -270,7 +313,7 @@ mod tests {
         let seed = [123u8; 32];
         let (pk_bytes, sk_bytes) = verify::keygen(&seed);
 
-        let sdk = ThresholdMlDsa44Sdk::from_existing_key(&sk_bytes, &[42u8; 32], 2, 3, 10).unwrap();
+        let mut sdk = ThresholdMlDsa44Sdk::insecure_from_existing_key(&sk_bytes, &[42u8; 32], 2, 3, 10).unwrap();
         assert_eq!(sdk.pk(), &pk_bytes[..PK_BYTES]);
 
         let mut rng = StdRng::seed_from_u64(999);

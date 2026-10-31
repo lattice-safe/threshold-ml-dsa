@@ -36,8 +36,12 @@ pub struct Signature {
 
 impl Signature {
     /// Encode the signature into the standard FIPS 204 byte format.
-    #[must_use] 
-    pub fn to_bytes(&self) -> Vec<u8> {
+    ///
+    /// Fails if `c_tilde` or `h` have the wrong length.
+    pub fn to_bytes(&self) -> Result<Vec<u8>, Error> {
+        if self.c_tilde.len() != CTILDEBYTES || self.h.len() != OMEGA + K {
+            return Err(Error::InvalidParameters);
+        }
         let mut sig = alloc::vec![0u8; SIG_BYTES];
         sig[..CTILDEBYTES].copy_from_slice(&self.c_tilde);
         let mut offset = CTILDEBYTES;
@@ -46,8 +50,21 @@ impl Signature {
             offset += POLYZ_PACKEDBYTES;
         }
         sig[offset..offset + self.h.len()].copy_from_slice(&self.h);
-        sig
+        Ok(sig)
     }
+}
+
+/// Reject party-supplied vectors with coefficients outside `[0, q)`.
+///
+/// Honest parties only ever produce canonical coefficients; anything else
+/// would overflow the i32 sums below.
+fn check_canonical<'a>(polys: impl IntoIterator<Item = &'a crate::poly::Poly>) -> Result<(), Error> {
+    for p in polys {
+        if p.coeffs.iter().any(|&c| !(0..Q).contains(&c)) {
+            return Err(Error::InvalidShare);
+        }
+    }
+    Ok(())
 }
 
 /// Aggregate K commitment vectors from T parties.
@@ -62,6 +79,9 @@ pub fn aggregate_commitments(
     for party_reveals in all_reveals {
         if party_reveals.len() < k_reps {
             return Err(Error::InvalidParameters);
+        }
+        for w in &party_reveals[..k_reps] {
+            check_canonical(&w.polys)?;
         }
     }
     let mut wfinals: Vec<PolyVecK> = Vec::with_capacity(k_reps);
@@ -88,6 +108,9 @@ pub fn aggregate_responses(
     for party_responses in all_responses {
         if party_responses.len() < k_reps {
             return Err(Error::InvalidParameters);
+        }
+        for z in &party_responses[..k_reps] {
+            check_canonical(&z.polys)?;
         }
     }
     let mut zfinals: Vec<PolyVecL> = Vec::with_capacity(k_reps);
@@ -118,9 +141,16 @@ pub fn combine(
     zfinals: &[PolyVecL],
     params: &ThresholdParams,
 ) -> Result<[u8; SIG_BYTES], Error> {
+    params.validate()?;
     let k_reps = params.k_reps as usize;
     if wfinals.len() < k_reps || zfinals.len() < k_reps {
         return Err(Error::InvalidParameters);
+    }
+    for w in &wfinals[..k_reps] {
+        check_canonical(&w.polys)?;
+    }
+    for z in &zfinals[..k_reps] {
+        check_canonical(&z.polys)?;
     }
     use dilithium::{
         packing::{pack_sig, unpack_pk},

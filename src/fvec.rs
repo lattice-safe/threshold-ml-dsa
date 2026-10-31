@@ -213,6 +213,9 @@ pub fn sample_hyperball(out: &mut FVec, radius: f64, nu: f64, rhop: &[u8; 64], n
     for (i, sample) in samples.iter().enumerate().take(FVEC_DIM) {
         out.coeffs[i] = sample * factor;
     }
+    // Both hold the unscaled nonce direction.
+    buf.zeroize();
+    samples.zeroize();
 }
 
 #[cfg(test)]

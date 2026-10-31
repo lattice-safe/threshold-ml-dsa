@@ -7,6 +7,7 @@ use threshold_ml_dsa::error::Error;
 use threshold_ml_dsa::params::*;
 use threshold_ml_dsa::poly::PolyVecK;
 use threshold_ml_dsa::sdk::ThresholdMlDsa44Sdk;
+use threshold_ml_dsa::nonce::InMemoryNonceGuard;
 use threshold_ml_dsa::sign;
 
 const MSG: &[u8] = b"security regression";
@@ -18,7 +19,7 @@ fn round1_both(sdk: &ThresholdMlDsa44Sdk, rng: &mut StdRng) -> (Vec<[u8; 32]>, V
     let mut states = Vec::new();
     for id in 0..2u8 {
         let sk = sdk.party_key(id as usize).unwrap();
-        let (h, st) = sign::round1(sk, sdk.params(), 0b11, MSG, &SESSION, rng).unwrap();
+        let (h, st) = sign::round1(sk, sdk.params(), 0b11, MSG, &SESSION, rng, &mut InMemoryNonceGuard::new()).unwrap();
         hashes.push(h);
         states.push(st);
     }
@@ -30,7 +31,7 @@ fn all_supported_configs_sign_and_verify() {
     let mut rng = StdRng::seed_from_u64(31);
     for n in 2..=6u8 {
         for t in 2..=n {
-            let sdk = ThresholdMlDsa44Sdk::from_seed(&[t * 10 + n; 32], t, n, 200).unwrap();
+            let mut sdk = ThresholdMlDsa44Sdk::from_seed(&[t * 10 + n; 32], t, n, 200).unwrap();
             let active: Vec<u8> = (n - t..n).collect();
             let sig = sdk
                 .threshold_sign(&active, MSG, &mut rng)
@@ -178,4 +179,213 @@ fn poly_debug_does_not_print_coefficients() {
     let mut p = Poly::zero();
     p.coeffs[0] = 123_456;
     assert!(!format!("{p:?}").contains("123456"));
+}
+
+#[test]
+fn tampered_params_are_rejected() {
+    let sdk = ThresholdMlDsa44Sdk::from_seed(&[4u8; 32], 2, 2, 1).unwrap();
+    let sk0 = sdk.party_key(0).unwrap();
+    let mut rng = StdRng::seed_from_u64(4);
+    for tamper in [
+        |p: &mut ThresholdParams| p.r = f64::NAN,
+        |p: &mut ThresholdParams| p.r = f64::INFINITY,
+        |p: &mut ThresholdParams| p.r1 *= 0.5,
+        |p: &mut ThresholdParams| p.k_reps += 1,
+        |p: &mut ThresholdParams| p.n = 9,
+    ] {
+        let mut params = *sdk.params();
+        tamper(&mut params);
+        assert_eq!(
+            sign::round1(sk0, &params, 0b11, MSG, &SESSION, &mut rng, &mut InMemoryNonceGuard::new()).err(),
+            Some(Error::InvalidParameters)
+        );
+    }
+    // Key generated for (2, 2) must not be used with (2, 3) parameters.
+    let other = get_threshold_params(2, 3).unwrap();
+    assert_eq!(
+        sign::round1(sk0, &other, 0b11, MSG, &SESSION, &mut rng, &mut InMemoryNonceGuard::new()).err(),
+        Some(Error::InvalidParameters)
+    );
+}
+
+#[test]
+fn verify_and_standard_sign_reject_malformed_lengths() {
+    use threshold_ml_dsa::verify;
+    let (pk, sk) = verify::keygen(&[6u8; 32]);
+    let sig = verify::sign_standard(MSG, &sk, &[0u8; 32]).unwrap();
+    assert!(verify::verify(&sig, MSG, &pk));
+    for bad_pk in [&pk[..0], &pk[..PK_BYTES - 1], &pk[..10]] {
+        assert!(!verify::verify(&sig, MSG, bad_pk));
+    }
+    assert!(!verify::verify_65(&sig, MSG, &pk[..10]));
+    assert!(!verify::verify_87(&sig, MSG, &pk[..10]));
+    assert!(verify::sign_standard(MSG, &sk[..10], &[0u8; 32]).is_err());
+    assert!(verify::sign_standard_65(MSG, &sk[..10], &[0u8; 32]).is_err());
+    assert!(verify::sign_standard_87(MSG, &sk[..10], &[0u8; 32]).is_err());
+}
+
+#[test]
+fn coordinator_rejects_out_of_range_party_input() {
+    use threshold_ml_dsa::coordinator::Signature;
+    use threshold_ml_dsa::poly::PolyVecL;
+
+    let mut z = PolyVecL::zero();
+    z.polys[0].coeffs[0] = i32::MAX;
+    let honest = PolyVecL::zero();
+    assert_eq!(
+        coordinator::aggregate_responses(&[vec![z], vec![honest]], 1).err(),
+        Some(Error::InvalidShare)
+    );
+    let mut w = PolyVecK::zero();
+    w.polys[0].coeffs[0] = -1;
+    assert_eq!(
+        coordinator::aggregate_commitments(&[vec![w], vec![PolyVecK::zero()]], 1).err(),
+        Some(Error::InvalidShare)
+    );
+
+    let sig = Signature { c_tilde: vec![0u8; 3], z: PolyVecL::zero(), h: vec![0u8; OMEGA + K] };
+    assert!(sig.to_bytes().is_err());
+    let sig = Signature { c_tilde: vec![0u8; CTILDEBYTES], z: PolyVecL::zero(), h: vec![0u8; 500] };
+    assert!(sig.to_bytes().is_err());
+}
+
+#[test]
+fn private_key_serialization_roundtrip_and_validation() {
+    use threshold_ml_dsa::rss::ThresholdPrivateKey;
+
+    let sdk = ThresholdMlDsa44Sdk::from_seed(&[8u8; 32], 3, 5, 1).unwrap();
+    for id in 0..5 {
+        let sk = sdk.party_key(id).unwrap();
+        let bytes = sk.to_bytes().unwrap();
+        let parsed = ThresholdPrivateKey::from_bytes(&bytes).unwrap();
+        assert_eq!(parsed.id(), sk.id());
+        assert_eq!(parsed.threshold(), (3, 5));
+        assert_eq!(*parsed.to_bytes().unwrap(), *bytes);
+    }
+
+    // A parsed key must be usable for signing.
+    let bytes = sdk.party_key(0).unwrap().to_bytes().unwrap();
+    let parsed = ThresholdPrivateKey::from_bytes(&bytes).unwrap();
+    let mut rng = StdRng::seed_from_u64(8);
+    assert!(sign::round1(&parsed, sdk.params(), 0b111, MSG, &SESSION, &mut rng, &mut InMemoryNonceGuard::new()).is_ok());
+
+    let good = sdk.party_key(1).unwrap().to_bytes().unwrap();
+    let mut bad = good.to_vec();
+    bad[0] = 2; // version
+    assert!(ThresholdPrivateKey::from_bytes(&bad).is_err());
+    let mut bad = good.to_vec();
+    bad[2] = 7; // N = 7 unsupported
+    assert!(ThresholdPrivateKey::from_bytes(&bad).is_err());
+    let mut bad = good.to_vec();
+    bad[3] = 5; // id ≥ N
+    assert!(ThresholdPrivateKey::from_bytes(&bad).is_err());
+    let mut bad = good.to_vec();
+    let last = bad.len() - 1;
+    bad[last] = 5; // coefficient out of [-η, η]
+    assert!(ThresholdPrivateKey::from_bytes(&bad).is_err());
+    assert!(ThresholdPrivateKey::from_bytes(&good[..good.len() - 1]).is_err());
+    assert!(ThresholdPrivateKey::from_bytes(&good[..10]).is_err());
+}
+
+/// Vectors from the Go reference `NewThresholdKeysFromSeed`
+/// (github.com/Threshold-ML-DSA/Threshold-ML-DSA, thmldsa44) with seed 00..1f.
+#[test]
+fn keygen_from_seed_matches_go_reference() {
+    use sha3::digest::{ExtendableOutput, Update, XofReader};
+    fn hex(b: &[u8]) -> String {
+        b.iter().map(|x| format!("{x:02x}")).collect()
+    }
+    let seed: [u8; 32] = core::array::from_fn(|i| i as u8);
+    for (t, n, pk_hash) in [
+        (2u8, 2u8, "0002e0024bde3b28b17462c09fceaa56"),
+        (2, 3, "b30d2fb8901d860b2a1c9c8613cb92fa"),
+        (3, 5, "ee87427885fc43881a024c49ce056bfc"),
+    ] {
+        let sdk = ThresholdMlDsa44Sdk::from_seed(&seed, t, n, 1).unwrap();
+        let pk = sdk.pk();
+        assert_eq!(hex(&pk[..32]), "d7b2b47254aae0db45e7930d4a98d2c97d8f1397d1789dafa17024b316e9bec9");
+        let mut h = sha3::Shake256::default();
+        h.update(pk);
+        let mut out = [0u8; 16];
+        h.finalize_xof().read(&mut out);
+        assert_eq!(hex(&out), pk_hash, "({t}, {n}) pk differs from Go");
+        assert_eq!(hex(&sdk.party_key(0).unwrap().tr()[..16]), pk_hash);
+    }
+}
+
+/// An RNG that always returns the same bytes (simulates a repeated RNG).
+struct StuckRng;
+impl rand::RngCore for StuckRng {
+    fn next_u32(&mut self) -> u32 {
+        7
+    }
+    fn next_u64(&mut self) -> u64 {
+        7
+    }
+    fn fill_bytes(&mut self, dest: &mut [u8]) {
+        dest.fill(7);
+    }
+    fn try_fill_bytes(&mut self, dest: &mut [u8]) -> Result<(), rand::Error> {
+        dest.fill(7);
+        Ok(())
+    }
+}
+impl rand::CryptoRng for StuckRng {}
+
+#[test]
+fn nonce_guard_refuses_replayed_session() {
+    let sdk = ThresholdMlDsa44Sdk::from_seed(&[10u8; 32], 2, 2, 1).unwrap();
+    let sk0 = sdk.party_key(0).unwrap();
+    let mut guard = InMemoryNonceGuard::new();
+    let mut rng = StdRng::seed_from_u64(10);
+    sign::round1(sk0, sdk.params(), 0b11, MSG, &SESSION, &mut rng, &mut guard).unwrap();
+    assert_eq!(
+        sign::round1(sk0, sdk.params(), 0b11, MSG, &SESSION, &mut rng, &mut guard).err(),
+        Some(Error::SessionReplay)
+    );
+    // A different key may use the same session ID.
+    let sk1 = sdk.party_key(1).unwrap();
+    assert!(sign::round1(sk1, sdk.params(), 0b11, MSG, &SESSION, &mut rng, &mut guard).is_ok());
+}
+
+#[test]
+fn nonce_guard_prevents_nonce_reuse_with_stuck_rng() {
+    use threshold_ml_dsa::nonce::NonceGuard;
+    let sdk = ThresholdMlDsa44Sdk::from_seed(&[11u8; 32], 2, 2, 1).unwrap();
+    let sk0 = sdk.party_key(0).unwrap();
+    // Capacity 1: session A is evicted after B, so A is accepted again, but
+    // the counter must still give a different nonce (and commitment).
+    let mut guard = InMemoryNonceGuard::with_capacity(1);
+    let a = [1u8; 32];
+    let b = [2u8; 32];
+    let (h1, _) = sign::round1(sk0, sdk.params(), 0b11, MSG, &a, &mut StuckRng, &mut guard).unwrap();
+    sign::round1(sk0, sdk.params(), 0b11, MSG, &b, &mut StuckRng, &mut guard).unwrap();
+    let (h2, _) = sign::round1(sk0, sdk.params(), 0b11, MSG, &a, &mut StuckRng, &mut guard).unwrap();
+    assert_ne!(h1, h2, "same session + stuck RNG must not reproduce the nonce");
+
+    let id = sk0.guard_key_id();
+    let mut g = InMemoryNonceGuard::new().with_start_counter(id, 41);
+    assert_eq!(g.reserve(&id, &[3u8; 32]).unwrap(), 41);
+    assert_eq!(g.reserve(&id, &[4u8; 32]).unwrap(), 42);
+    assert_eq!(g.counter(&id), 43);
+}
+
+#[cfg(feature = "insecure-keygen")]
+#[test]
+fn insecure_aposteriori_rejects_malformed_secret_keys() {
+    use threshold_ml_dsa::aposteriori::insecure_share_existing_key;
+    use threshold_ml_dsa::verify;
+    let params = get_threshold_params(2, 3).unwrap();
+    let (_, sk) = verify::keygen(&[12u8; 32]);
+    assert!(insecure_share_existing_key(&sk, &[0u8; 32], &params).is_ok());
+
+    // tr no longer matches the key (bytes 64..128 hold tr).
+    let mut bad = sk.to_vec();
+    bad[64] ^= 1;
+    assert!(insecure_share_existing_key(&bad, &[0u8; 32], &params).is_err());
+
+    // s₁ coefficient outside [-η, η]: 3-bit value 7 decodes to η − 7 = −5.
+    let mut bad = sk.to_vec();
+    bad[128] = 0xFF; // first s₁ byte (sk = ρ ‖ K ‖ tr ‖ s₁ ‖ s₂ ‖ t₀)
+    assert!(insecure_share_existing_key(&bad, &[0u8; 32], &params).is_err());
 }

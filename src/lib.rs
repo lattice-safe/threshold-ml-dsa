@@ -1,9 +1,10 @@
 //! # Threshold ML-DSA
 //!
-//! A production-grade implementation of the "Efficient Threshold ML-DSA" scheme
-//! (ePrint 2026/013, Celi et al. — the "Mithril" scheme).
+//! An implementation of the "Efficient Threshold ML-DSA" scheme
+//! (ePrint 2026/013, Celi et al. — the "Mithril" scheme). It has not been
+//! independently audited.
 //!
-//! This crate implements a hardened 3-round distributed signing protocol for ML-DSA (FIPS 204)
+//! This crate implements the 3-round threshold signing protocol for ML-DSA-44 (FIPS 204)
 //! using Replicated Secret Sharing (RSS) and hyperball-based local rejection sampling.
 //! The resulting threshold signatures are bit-for-bit verifiable by any standard,
 //! unmodified ML-DSA verifier.
@@ -47,12 +48,10 @@ extern crate alloc;
 #[cfg(feature = "insecure-keygen")]
 pub mod aposteriori;
 pub mod coordinator;
-/// **Insecure**: every participant learns the full secret key. Only
-/// available with the `insecure-keygen` feature.
-#[cfg(feature = "insecure-keygen")]
 pub mod dkg;
 pub mod error;
 pub mod fvec;
+pub mod nonce;
 pub mod params;
 pub mod partition;
 pub mod poly;
