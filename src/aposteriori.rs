@@ -1,20 +1,57 @@
-//! A Posteriori Key Sharing for Threshold ML-DSA.
+//! A posteriori key sharing: split an existing ML-DSA-44 secret key into
+//! threshold Replicated Secret Sharing (RSS) keys with the same public key.
 //!
-//! Implements ePrint 2026/013 §4.2: converting an existing, standard ML-DSA-44
-//! secret key into threshold Replicated Secret Sharing (RSS) key material
-//! while preserving the original public key.
+//! Follows §3.4 of the paper (USENIX Security '26 version of ePrint
+//! 2026/013): "we sample a short secret sharing (as in the key generation of
+//! 3.1) with the difference that the shares will be conditioned on their sum
+//! being s."
 //!
-//! ## Protocol Overview
+//! ## Algorithm
 //!
-//! Given an existing secret key `(s₁, s₂)`:
-//! 1. Enumerate all C(N, N-T+1) subsets `I ⊂ [N]` of size `N-T+1`.
-//! 2. For all subsets except the last, sample fresh short shares `s_I ← U([-η, η])`.
-//! 3. The last subset receives the remainder share:
-//!    `s_last = s_orig - Σ_{I ≠ last} s_I`.
-//! 4. Distribute shares to parties as in standard RSS keygen.
+//! For `S = C(N, N−T+1)` subsets, every coefficient position of `(s₁, s₂)`
+//! is shared independently: `(x_1, …, x_S)` is drawn from the discrete
+//! Gaussian of parameter σ = √2 (density ∝ `exp(−x²/4)`, the same variance
+//! as `U([−2, 2])` in fresh keygen) restricted to the coset
+//! `{x ∈ Z^S : Σ x_i = s}` of the root lattice `{Σ x_i = 0}`, with every
+//! `|x_i| ≤ 10` (tail mass below 2⁻⁴⁴ per coordinate).
 //!
-//! The resulting threshold secret key material sums to the original secret key `(s₁, s₂)`,
-//! so the corresponding threshold public key is identical to the original public key.
+//! The paper samples this coset Gaussian with a GPV sampler analysed under
+//! Rényi divergence. This module samples it by rejection, exactly up to
+//! the 64-bit rounding of its probability tables (statistical distance
+//! about 2⁻⁶³ per coefficient):
+//! propose `x_1..x_{S−1}` i.i.d. from the truncated `D_{Z,σ}`, set
+//! `x_S = s − Σ x_i`, and accept with probability `exp(−x_S²/4)·[|x_S| ≤ 10]`.
+//! The accepted vector has density ∝ `Π exp(−x_i²/4)` on the coset, which is
+//! symmetric in the S shares: no share is a special "remainder".
+//!
+//! Sampling is constant-time in the secret: the Gaussian sampler is a
+//! full-table CDT scan, the acceptance probability is looked up with a full
+//! table scan, and each coefficient runs a fixed batch of
+//! [`TRIALS`] proposals and selects the first accepted one without
+//! branching. A batch fails for some coefficient with probability below
+//! 2⁻³³ per key; the batch is then repeated with fresh randomness.
+//!
+//! ## Security
+//!
+//! A short sharing of a fixed secret cannot be perfectly hiding: T−1
+//! parties see every share but one, which is a hint on `s`. The paper
+//! captures this as hint-MLWE. Its formal result (Theorem 3.3) needs a
+//! larger share width (at most 7 bits of security lost, up to 10× the
+//! communication) and assumes Gaussian secrets, and the parameters for it
+//! are only in the full version. With σ = √2, as here, signing parameters
+//! and communication are unchanged, but the bound is heuristic: the paper
+//! estimates the loss at **at most 12 bits** with the lattice estimator.
+//! Prefer fresh keys ([`crate::rss::keygen_from_seed`] or [`crate::dkg`])
+//! when the public key does not have to be kept.
+//!
+//! **Share a key at most once.** Each sharing hands a coalition below T an
+//! independent hint `s − x_M` on the same secret; k sharings act like one
+//! hint with variance 2/k, and the paper's estimate covers k = 1 only. To
+//! refresh shares, change (T, N) or replace a party, generate a new key.
+//!
+//! The function runs on the key owner's machine, which sees the whole
+//! secret. Deliver each party's key over an authenticated, encrypted
+//! channel and delete the original secret key afterwards.
 
 #[cfg(not(feature = "std"))]
 use alloc::{collections::BTreeMap, vec::Vec};
@@ -22,217 +59,275 @@ use alloc::{collections::BTreeMap, vec::Vec};
 use std::collections::BTreeMap;
 
 use crate::error::Error;
-use crate::params::{
-    ThresholdParams, K, L, MAX_PARTIES, N, PK_BYTES, SK_BYTES, TRBYTES,
-};
+use crate::params::{ThresholdParams, ETA, K, L, N, PK_BYTES, SK_BYTES, TRBYTES};
 use crate::poly::{PolyVecK, PolyVecL};
-use crate::rss::{compute_public_key, sample_leq_eta, Share, ThresholdPrivateKey};
+use crate::rss::{compute_public_key, subset_masks, Share, ThresholdPrivateKey};
+use rand_core::{CryptoRng, RngCore};
 use sha3::digest::{ExtendableOutput, Update, XofReader};
 use sha3::Shake256;
+use subtle::ConstantTimeEq;
+use zeroize::{Zeroize, Zeroizing};
 
-/// Decompose an existing ML-DSA-44 secret key into threshold RSS private keys.
+/// Largest share coefficient magnitude produced by a posteriori sharing.
+pub const SHARE_BOUND: i32 = 10;
+
+/// Proposals per coefficient in one constant-time batch (S ≤ 20 subsets).
+pub const TRIALS: usize = 128;
+
+/// Proposals per batch for S > 20 subsets (N = 7, 8), where acceptance
+/// drops to ≈ 0.12: keeps batch failure below 2⁻⁵⁰ per key.
+pub const TRIALS_LARGE: usize = 448;
+
+/// Maximum number of subsets (C(8, 4) = 70).
+const MAX_SUBSETS: usize = 70;
+
+/// `CDT[i] = ⌊2⁶⁴ · P(X ≤ −10 + i)⌋` for `X ~ D_{Z,√2}` truncated to `[−10, 10]`.
+const CDT: [u64; 20] = [
+    0x0000_0000_044e_bd3c,
+    0x0000_0001_f632_0f77,
+    0x0000_008a_4ed6_54ec,
+    0x0000_172f_e5f7_ef81,
+    0x0002_5f41_b96c_55ec,
+    0x0026_0fa4_9b64_4581,
+    0x0178_ab43_285d_f6be,
+    0x0915_390c_d667_794c,
+    0x23a6_5816_4624_d361,
+    0x5be4_515f_7ac7_82c8,
+    0xa41b_aea0_8538_7d37,
+    0xdc59_a7e9_b9db_2c9e,
+    0xf6ea_c6f3_2998_86b3,
+    0xfe87_54bc_d7a2_0941,
+    0xffd9_f05b_649b_ba7e,
+    0xfffd_a0be_4693_aa13,
+    0xffff_e8d0_1a08_107e,
+    0xffff_ff75_b129_ab13,
+    0xffff_fffe_09cd_f088,
+    0xffff_ffff_fbb1_42c3,
+];
+
+/// `ACCEPT[k] = ⌊2⁶⁴ · exp(−k²/4)⌋` for `k ∈ [0, 10]`.
+const ACCEPT: [u128; 11] = [
+    0x1_0000_0000_0000_0000,
+    0xc75f_7cf5_6410_5743,
+    0x5e2d_58d8_b3bc_df1a,
+    0x1afb_718e_8457_f74e,
+    0x04b0_556e_084f_3d1d,
+    0x007e_83a5_61ab_af1a,
+    0x0008_1679_1293_2a2c,
+    0x0000_5047_ec36_81dc,
+    0x0000_01e3_55bb_aee8,
+    0x0000_0006_e4f7_8789,
+    0x0000_0000_0f45_1bd2,
+];
+
+/// 1 if `a < b`, else 0, without branching (`a, b < 2¹²⁷`).
+#[inline]
+fn ct_lt(a: u128, b: u128) -> u128 {
+    a.wrapping_sub(b) >> 127
+}
+
+/// All-ones if `a == b`, else 0, without branching.
+#[inline]
+fn ct_eq_mask(a: i32, b: i32) -> i32 {
+    let d = (a ^ b) as u32;
+    // (d | -d) has its top bit set iff d != 0.
+    (((d | d.wrapping_neg()) >> 31) as i32) - 1
+}
+
+/// Sample from `D_{Z,√2}` truncated to `[−10, 10]` in constant time.
+fn sample_gaussian(xof: &mut impl XofReader) -> i32 {
+    let mut b = [0u8; 8];
+    xof.read(&mut b);
+    let u = u128::from(u64::from_le_bytes(b));
+    let mut x = -SHARE_BOUND;
+    for &c in &CDT {
+        x += (1 - ct_lt(u, u128::from(c))) as i32;
+    }
+    b.zeroize();
+    x
+}
+
+/// `ACCEPT[|x|]`, or 0 if `|x| > 10`, in constant time.
+fn accept_threshold(x: i32) -> u128 {
+    let sign = x >> 31;
+    let a = (x ^ sign) - sign;
+    let mut out = 0u128;
+    for (k, &v) in ACCEPT.iter().enumerate() {
+        out |= v & (ct_eq_mask(a, k as i32) as i64 as i128 as u128);
+    }
+    out
+}
+
+/// Share one coefficient `s` into `out[..num]` with `Σ out = s`, from the
+/// σ = √2 Gaussian restricted to that coset. Returns `false` if no proposal
+/// in the batch was accepted (`out` is then all zero).
+fn share_coefficient(s: i32, out: &mut [i32], xof: &mut impl XofReader) -> bool {
+    let num = out.len();
+    let mut cand = [0i32; MAX_SUBSETS];
+    out.iter_mut().for_each(|o| *o = 0);
+    // All-ones once a proposal has been accepted.
+    let mut done = 0i32;
+    // The batch size depends only on the public subset count.
+    let trials = if num <= 20 { TRIALS } else { TRIALS_LARGE };
+    for _ in 0..trials {
+        let mut sum = 0i32;
+        for c in cand.iter_mut().take(num - 1) {
+            *c = sample_gaussian(xof);
+            sum += *c;
+        }
+        cand[num - 1] = s - sum;
+        let mut b = [0u8; 8];
+        xof.read(&mut b);
+        let u = u128::from(u64::from_le_bytes(b));
+        let accept = -(ct_lt(u, accept_threshold(cand[num - 1])) as i32);
+        let take = accept & !done;
+        for (o, &c) in out.iter_mut().zip(cand.iter()) {
+            *o |= c & take;
+        }
+        done |= accept;
+    }
+    cand.zeroize();
+    done != 0
+}
+
+/// Share an existing ML-DSA-44 secret key among N parties with threshold T.
 ///
-/// # Arguments
-/// * `sk_bytes` — Packed ML-DSA-44 secret key (`SK_BYTES` = 2592 bytes).
-/// * `seed` — 32-byte seed for generating non-remainder subset shares.
-/// * `params` — Threshold parameters (T, N).
-///
-/// # Returns
-/// `Ok((public_key_bytes, Vec<ThresholdPrivateKey>))` — The original packed public key
-/// and per-party threshold private keys.
+/// Returns the original packed public key and one private key per party.
+/// See the module documentation for the algorithm and its security loss.
 ///
 /// # Errors
-/// Returns `Error::InvalidParameters` if `sk_bytes` length is invalid or `params` are out of range.
-pub fn share_existing_key(
+/// - `Error::InvalidParameters` if `sk_bytes` has the wrong length, `params`
+///   are not the canonical parameters for (T, N), the key's `s₁`/`s₂` are
+///   not η-short, or its stored `tr` does not match its public key.
+pub fn share_existing_key<R: RngCore + CryptoRng>(
     sk_bytes: &[u8],
-    seed: &[u8; 32],
     params: &ThresholdParams,
+    rng: &mut R,
 ) -> Result<([u8; PK_BYTES], Vec<ThresholdPrivateKey>), Error> {
     if sk_bytes.len() != SK_BYTES {
         return Err(Error::InvalidParameters);
     }
-    let n = params.n;
-    let t = params.t;
-    if !(t >= 2 && t <= n) || (n as usize) > MAX_PARTIES {
-        return Err(Error::InvalidParameters);
-    }
+    // validate() also rejects unsupported (T, N).
+    params.validate()?;
 
     use dilithium::{
         packing::unpack_sk,
         polyvec::{PolyVecK as DPolyVecK, PolyVecL as DPolyVecL},
         ML_DSA_44,
     };
-    let mode = ML_DSA_44;
 
-    // 1. Unpack original ML-DSA-44 secret key
     let mut rho = [0u8; 32];
     let mut tr_orig = [0u8; TRBYTES];
-    let mut key_orig = [0u8; 32];
+    let mut key_orig = Zeroizing::new([0u8; 32]);
     let mut t0_d = DPolyVecK::default();
     let mut s1_d = DPolyVecL::default();
     let mut s2_d = DPolyVecK::default();
+    unpack_sk(ML_DSA_44, &mut rho, &mut tr_orig, &mut key_orig, &mut t0_d, &mut s1_d, &mut s2_d, sk_bytes);
 
-    unpack_sk(
-        mode,
-        &mut rho,
-        &mut tr_orig,
-        &mut key_orig,
-        &mut t0_d,
-        &mut s1_d,
-        &mut s2_d,
-        sk_bytes,
-    );
-
-    // Convert dilithium-rs vectors to our internal PolyVecL and PolyVecK
     let mut s1_orig = PolyVecL::zero();
     for i in 0..L {
-        for j in 0..N {
-            s1_orig.polys[i].coeffs[j] = s1_d.vec[i].coeffs[j];
-        }
+        s1_orig.polys[i].coeffs.copy_from_slice(&s1_d.vec[i].coeffs[..N]);
     }
-
     let mut s2_orig = PolyVecK::zero();
     for i in 0..K {
-        for j in 0..N {
-            s2_orig.polys[i].coeffs[j] = s2_d.vec[i].coeffs[j];
-        }
+        s2_orig.polys[i].coeffs.copy_from_slice(&s2_d.vec[i].coeffs[..N]);
+    }
+    for p in s1_d.vec.iter_mut().chain(s2_d.vec.iter_mut()).chain(t0_d.vec.iter_mut()) {
+        p.coeffs.zeroize();
     }
 
-    // Expand randomness seed for generating non-remainder subset shares
-    let mut h = Shake256::default();
-    h.update(b"th-ml-dsa-aposteriori-v1");
-    h.update(seed);
-    h.update(sk_bytes);
-    let mut reader = h.finalize_xof();
+    let result = share_vectors(&s1_orig, &s2_orig, &rho, &tr_orig, sk_bytes, params, rng);
+    s1_orig.zeroize();
+    s2_orig.zeroize();
+    result
+}
 
-    // 2. Initialize per-party private keys
-    let mut sks: Vec<ThresholdPrivateKey> = Vec::with_capacity(n as usize);
-    for i in 0..n {
-        let mut pkey = [0u8; 32];
-        reader.read(&mut pkey);
-        sks.push(ThresholdPrivateKey {
-            id: i,
-            rho,
-            key: pkey,
-            tr: [0u8; TRBYTES],
-            shares: BTreeMap::new(),
-        });
-    }
+fn share_vectors<R: RngCore + CryptoRng>(
+    s1_orig: &PolyVecL,
+    s2_orig: &PolyVecK,
+    rho: &[u8; 32],
+    tr_orig: &[u8; TRBYTES],
+    sk_bytes: &[u8],
+    params: &ThresholdParams,
+    rng: &mut R,
+) -> Result<([u8; PK_BYTES], Vec<ThresholdPrivateKey>), Error> {
+    let (t, n) = (params.t, params.n);
 
-    // Collect all subset bitmasks via Gosper's hack
-    let subset_size = n - t + 1;
-    let mut mask: u16 = (1u16 << subset_size) - 1;
-    let limit: u16 = 1u16 << n;
-    let mut subset_masks = Vec::new();
-
-    while mask < limit {
-        subset_masks.push(mask as u8);
-        let c = mask & mask.wrapping_neg();
-        if c == 0 {
-            break;
-        }
-        let r = mask.wrapping_add(c);
-        if r >= limit {
-            break;
-        }
-        mask = (((r ^ mask) >> 2) / c) | r;
-    }
-
-    if subset_masks.is_empty() {
+    // Reject malformed keys: s₁, s₂ must be η-short.
+    let eta = ETA as i32;
+    if s1_orig.polys.iter().chain(s2_orig.polys.iter()).any(|p| p.coeffs.iter().any(|&c| !(-eta..=eta).contains(&c))) {
         return Err(Error::InvalidParameters);
     }
 
-    // Accumulator for non-remainder sampled shares
-    let mut s1_acc = PolyVecL::zero();
-    let mut s2_acc = PolyVecK::zero();
+    // The stored tr must match the public key the shares will produce.
+    let mut s1h = s1_orig.clone();
+    s1h.reduce();
+    s1h.ntt();
+    let pk = compute_public_key(rho, &s1h, s2_orig);
+    s1h.zeroize();
+    let mut tr = [0u8; TRBYTES];
+    let mut h = Shake256::default();
+    h.update(&pk);
+    h.finalize_xof().read(&mut tr);
+    if !bool::from(tr.ct_eq(tr_orig)) {
+        return Err(Error::InvalidParameters);
+    }
 
-    let num_subsets = subset_masks.len();
+    // Hedged randomness: fresh RNG output plus the key itself.
+    let mut fresh = Zeroizing::new([0u8; 64]);
+    rng.fill_bytes(&mut fresh[..]);
+    let mut h = Shake256::default();
+    h.update(b"th-ml-dsa-aposteriori-gauss-v1");
+    h.update(&[t, n]);
+    h.update(&fresh[..]);
+    h.update(sk_bytes);
+    let mut xof = h.finalize_xof();
 
-    // 3. Process all subsets except the last one
-    for &subset_mask in &subset_masks[..num_subsets - 1] {
-        let mut sseed = [0u8; 64];
-        reader.read(&mut sseed);
+    let masks = subset_masks(n, t);
+    let num = masks.len();
+    if !(2..=MAX_SUBSETS).contains(&num) {
+        return Err(Error::InvalidParameters);
+    }
 
-        let mut share = Share {
-            s1: PolyVecL::zero(),
-            s2: PolyVecK::zero(),
-            s1h: PolyVecL::zero(),
-            s2h: PolyVecK::zero(),
-        };
-
-        for j in 0..L {
-            sample_leq_eta(&mut share.s1.polys[j], &sseed, j as u16);
+    let mut shares: Vec<Share> = (0..num)
+        .map(|_| Share { s1: PolyVecL::zero(), s2: PolyVecK::zero(), s1h: PolyVecL::zero(), s2h: PolyVecK::zero() })
+        .collect();
+    let mut out = [0i32; MAX_SUBSETS];
+    for poly in 0..L + K {
+        for j in 0..N {
+            let s = if poly < L { s1_orig.polys[poly].coeffs[j] } else { s2_orig.polys[poly - L].coeffs[j] };
+            while !share_coefficient(s, &mut out[..num], &mut xof) {}
+            for (share, &x) in shares.iter_mut().zip(out.iter()) {
+                if poly < L {
+                    share.s1.polys[poly].coeffs[j] = x;
+                } else {
+                    share.s2.polys[poly - L].coeffs[j] = x;
+                }
+            }
         }
-        for j in 0..K {
-            sample_leq_eta(&mut share.s2.polys[j], &sseed, (j + L) as u16);
-        }
+    }
+    out.zeroize();
 
-        // Accumulate
-        s1_acc.add_assign(&share.s1);
-        s2_acc.add_assign(&share.s2);
-
-        // Pre-compute NTT domain representation
+    let mut sks: Vec<ThresholdPrivateKey> = (0..n)
+        .map(|id| {
+            let mut key = Zeroizing::new([0u8; 32]);
+            xof.read(&mut key[..]);
+            ThresholdPrivateKey { t, n, id, rho: *rho, key: *key, tr, shares: BTreeMap::new() }
+        })
+        .collect();
+    for (mask, mut share) in masks.into_iter().zip(shares) {
         share.s1h = share.s1.clone();
         share.s1h.reduce();
         share.s1h.ntt();
         share.s2h = share.s2.clone();
         share.s2h.reduce();
         share.s2h.ntt();
-
-        // Distribute to parties in this subset
-        for i in 0..n {
-            if subset_mask & (1 << i) != 0 {
-                sks[i as usize].shares.insert(subset_mask, share.clone());
-            }
+        for sk in sks.iter_mut().filter(|sk| mask & (1 << sk.id) != 0) {
+            sk.shares.insert(mask, share.clone());
         }
     }
 
-    // 4. Last subset gets the remainder: s_last = s_orig - s_acc
-    let last_mask = subset_masks[num_subsets - 1];
-    let mut share_last = Share {
-        s1: PolyVecL::zero(),
-        s2: PolyVecK::zero(),
-        s1h: PolyVecL::zero(),
-        s2h: PolyVecK::zero(),
-    };
-
-    share_last.s1 = PolyVecL::zero();
-    PolyVecL::sub(&mut share_last.s1, &s1_orig, &s1_acc);
-    share_last.s2 = PolyVecK::zero();
-    PolyVecK::sub(&mut share_last.s2, &s2_orig, &s2_acc);
-
-    share_last.s1h = share_last.s1.clone();
-    share_last.s1h.reduce();
-    share_last.s1h.ntt();
-    share_last.s2h = share_last.s2.clone();
-    share_last.s2h.reduce();
-    share_last.s2h.ntt();
-
-    for i in 0..n {
-        if last_mask & (1 << i) != 0 {
-            sks[i as usize].shares.insert(last_mask, share_last.clone());
-        }
-    }
-
-    // 5. Derive the public key from s1_orig and s2_orig
-    let mut s1_orig_ntt = s1_orig.clone();
-    s1_orig_ntt.reduce();
-    s1_orig_ntt.ntt();
-
-    let pk_bytes = compute_public_key(&rho, &s1_orig_ntt, &s2_orig);
-
-    // 6. Derive tr = CRH(pk)
-    let mut tr = [0u8; TRBYTES];
-    let mut h_tr = Shake256::default();
-    h_tr.update(&pk_bytes);
-    let mut tr_reader = h_tr.finalize_xof();
-    tr_reader.read(&mut tr);
-
-    for sk in &mut sks {
-        sk.tr = tr;
-    }
-
-    Ok((pk_bytes, sks))
+    Ok((pk, sks))
 }
 
 #[cfg(test)]
@@ -240,45 +335,228 @@ mod tests {
     use super::*;
     use crate::params::get_threshold_params;
     use crate::verify;
+    use rand::rngs::StdRng;
+    use rand::SeedableRng;
+    use sha3::Shake128;
 
-    #[test]
-    fn test_aposteriori_sharing_preserves_pk_and_verifies() {
-        let seed = [42u8; 32];
-        let (pk_bytes, sk_bytes) = verify::keygen(&seed);
-        let mut sk_fixed = [0u8; SK_BYTES];
-        sk_fixed.copy_from_slice(&sk_bytes);
-
-        let params = get_threshold_params(2, 3).unwrap();
-        let (th_pk, sks) = share_existing_key(&sk_fixed, &[99u8; 32], &params).unwrap();
-
-        // The derived public key from a posteriori sharing MUST match the original pk
-        assert_eq!(th_pk, pk_bytes[..PK_BYTES]);
-        assert_eq!(sks.len(), 3);
-
-        // Sign a message using standard ML-DSA to ensure keypair is valid
-        let msg = b"A posteriori key sharing verification test";
-        let std_sig = verify::sign_standard(msg, &sk_fixed, &[1u8; 32]);
-        assert!(verify::verify(&std_sig, msg, &th_pk));
+    fn xof() -> impl XofReader {
+        let mut h = Shake128::default();
+        h.update(b"aposteriori-test");
+        h.finalize_xof()
     }
 
     #[test]
-    fn test_sdk_aposteriori_threshold_sign() {
+    fn gaussian_sampler_matches_sigma_sqrt2() {
+        let mut x = xof();
+        let trials = 200_000;
+        let (mut sum, mut sq) = (0i64, 0i64);
+        for _ in 0..trials {
+            let v = i64::from(sample_gaussian(&mut x));
+            sum += v;
+            sq += v * v;
+        }
+        let mean = sum as f64 / trials as f64;
+        let var = sq as f64 / trials as f64 - mean * mean;
+        assert!(mean.abs() < 0.02, "mean {mean}");
+        // Var(D_{Z,√2}) ≈ 2.0
+        assert!((var - 2.0).abs() < 0.04, "var {var}");
+    }
+
+    #[test]
+    fn accept_threshold_table() {
+        assert_eq!(accept_threshold(0), 1u128 << 64);
+        assert_eq!(accept_threshold(-3), ACCEPT[3]);
+        assert_eq!(accept_threshold(10), ACCEPT[10]);
+        assert_eq!(accept_threshold(11), 0);
+        assert_eq!(accept_threshold(-40), 0);
+    }
+
+    #[test]
+    fn coefficient_shares_sum_and_are_symmetric() {
+        // S = 20 (T = 4, N = 6): first and last share must have the same
+        // distribution, i.e. there is no "remainder" share.
+        let mut x = xof();
+        let num = 20;
+        let trials = 5_000; // σ̂² has standard error ≈ 0.04 here
+        let mut out = [0i32; MAX_SUBSETS];
+        let (mut m_first, mut m_last, mut v_first, mut v_last) = (0f64, 0f64, 0f64, 0f64);
+        for i in 0..trials {
+            let s = i % 5 - 2;
+            while !share_coefficient(s, &mut out[..num], &mut x) {}
+            assert_eq!(out[..num].iter().sum::<i32>(), s);
+            assert!(out[..num].iter().all(|c| c.abs() <= SHARE_BOUND));
+            m_first += f64::from(out[0]);
+            m_last += f64::from(out[num - 1]);
+            v_first += f64::from(out[0] * out[0]);
+            v_last += f64::from(out[num - 1] * out[num - 1]);
+        }
+        let n = f64::from(trials);
+        let (vf, vl) = (v_first / n, v_last / n);
+        assert!((m_first / n).abs() < 0.08 && (m_last / n).abs() < 0.08);
+        // Conditioned variance ≈ σ²(1 − 1/S) + E[s²]/S² ≈ 1.9 for both.
+        assert!((vf - 1.9).abs() < 0.15, "first share variance {vf}");
+        assert!((vl - 1.9).abs() < 0.15, "last share variance {vl}");
+    }
+
+    #[test]
+    fn sharing_sums_to_secret_and_shares_give_pk() {
+        let (pk_bytes, sk_bytes) = verify::keygen(&[42u8; 32]);
+        let params = get_threshold_params(4, 6).unwrap();
+        let mut rng = StdRng::seed_from_u64(1);
+        let (pk, sks) = share_existing_key(&sk_bytes, &params, &mut rng).unwrap();
+        assert_eq!(pk[..], pk_bytes[..PK_BYTES]);
+        assert_eq!(sks.len(), 6);
+
+        // Σ_I s_I equals the original (s₁, s₂); take each subset once and
+        // check that every party's copy of a subset share is identical.
+        let mut total1 = PolyVecL::zero();
+        let mut total2 = PolyVecK::zero();
+        let mut first: BTreeMap<u8, u8> = BTreeMap::new();
+        for sk in &sks {
+            for (&mask, share) in &sk.shares {
+                assert!(mask & (1 << sk.id) != 0);
+                assert!(share
+                    .s1
+                    .polys
+                    .iter()
+                    .chain(share.s2.polys.iter())
+                    .all(|p| p.coeffs.iter().all(|c| c.abs() <= SHARE_BOUND)));
+                if let Some(&owner) = first.get(&mask) {
+                    let other = &sks[owner as usize].shares[&mask];
+                    assert!(other.s1.polys.iter().zip(&share.s1.polys).all(|(a, b)| a.coeffs == b.coeffs));
+                    assert!(other.s2.polys.iter().zip(&share.s2.polys).all(|(a, b)| a.coeffs == b.coeffs));
+                } else {
+                    first.insert(mask, sk.id);
+                    total1.add_assign(&share.s1);
+                    total2.add_assign(&share.s2);
+                }
+            }
+        }
+        assert_eq!(first.len(), subset_masks(6, 4).len());
+        use dilithium::{packing::unpack_sk, polyvec::{PolyVecK as DK, PolyVecL as DL}, ML_DSA_44};
+        let (mut rho, mut tr, mut key) = ([0u8; 32], [0u8; TRBYTES], [0u8; 32]);
+        let (mut t0, mut s1, mut s2) = (DK::default(), DL::default(), DK::default());
+        unpack_sk(ML_DSA_44, &mut rho, &mut tr, &mut key, &mut t0, &mut s1, &mut s2, &sk_bytes);
+        for i in 0..L {
+            assert_eq!(total1.polys[i].coeffs[..], s1.vec[i].coeffs[..N]);
+        }
+        for i in 0..K {
+            assert_eq!(total2.polys[i].coeffs[..], s2.vec[i].coeffs[..N]);
+        }
+
+        // The public key computed from the shares' sum is the original one.
+        let mut h1 = total1.clone();
+        h1.reduce();
+        h1.ntt();
+        assert_eq!(compute_public_key(&rho, &h1, &total2)[..], pk_bytes[..PK_BYTES]);
+    }
+
+    #[test]
+    fn rejects_secret_outside_eta_even_with_matching_tr() {
+        // A key whose s₁ has a coefficient of 3 but whose tr is consistent,
+        // so only the η range check can reject it.
+        let (_, sk_bytes) = verify::keygen(&[43u8; 32]);
+        use dilithium::{packing::unpack_sk, polyvec::{PolyVecK as DK, PolyVecL as DL}, ML_DSA_44};
+        let (mut rho, mut tr, mut key) = ([0u8; 32], [0u8; TRBYTES], [0u8; 32]);
+        let (mut t0, mut s1, mut s2) = (DK::default(), DL::default(), DK::default());
+        unpack_sk(ML_DSA_44, &mut rho, &mut tr, &mut key, &mut t0, &mut s1, &mut s2, &sk_bytes);
+        let mut v1 = PolyVecL::zero();
+        for i in 0..L {
+            v1.polys[i].coeffs.copy_from_slice(&s1.vec[i].coeffs[..N]);
+        }
+        let mut v2 = PolyVecK::zero();
+        for i in 0..K {
+            v2.polys[i].coeffs.copy_from_slice(&s2.vec[i].coeffs[..N]);
+        }
+        v1.polys[0].coeffs[0] = 3;
+        let mut h1 = v1.clone();
+        h1.reduce();
+        h1.ntt();
+        let pk = compute_public_key(&rho, &h1, &v2);
+        let mut tr2 = [0u8; TRBYTES];
+        let mut h = Shake256::default();
+        h.update(&pk);
+        h.finalize_xof().read(&mut tr2);
+
+        let params = get_threshold_params(2, 3).unwrap();
+        let mut rng = StdRng::seed_from_u64(3);
+        assert_eq!(
+            share_vectors(&v1, &v2, &rho, &tr2, &sk_bytes, &params, &mut rng).err(),
+            Some(Error::InvalidParameters)
+        );
+        v1.polys[0].coeffs[0] = 2;
+        let mut h1 = v1.clone();
+        h1.reduce();
+        h1.ntt();
+        let pk = compute_public_key(&rho, &h1, &v2);
+        let mut h = Shake256::default();
+        h.update(&pk);
+        h.finalize_xof().read(&mut tr2);
+        assert!(share_vectors(&v1, &v2, &rho, &tr2, &sk_bytes, &params, &mut rng).is_ok());
+    }
+
+    #[test]
+    fn sdk_threshold_sign_with_shared_key() {
         use crate::sdk::ThresholdMlDsa44Sdk;
-        use rand::rngs::StdRng;
-        use rand::SeedableRng;
-
-        let seed = [123u8; 32];
-        let (pk_bytes, sk_bytes) = verify::keygen(&seed);
-
-        let sdk = ThresholdMlDsa44Sdk::from_existing_key(&sk_bytes, &[42u8; 32], 2, 3, 10).unwrap();
-        assert_eq!(sdk.pk(), &pk_bytes[..PK_BYTES]);
-
+        let (pk_bytes, sk_bytes) = verify::keygen(&[123u8; 32]);
         let mut rng = StdRng::seed_from_u64(999);
-        let msg = b"Threshold signing with aposteriori key sharing";
-        let active = [0, 1]; // party 0 and 1 active out of 3
-
-        let sig = sdk.threshold_sign(&active, msg, &mut rng).unwrap();
-        assert!(sdk.verify(msg, &sig));
+        let mut sdk = ThresholdMlDsa44Sdk::from_existing_key(&sk_bytes, 2, 3, 10, &mut rng).unwrap();
+        assert_eq!(sdk.pk(), &pk_bytes[..PK_BYTES]);
+        let msg = b"Threshold signing with a posteriori key sharing";
+        let sig = sdk.threshold_sign(&[0, 1], msg, &mut rng).unwrap();
         assert!(verify::verify(&sig, msg, &pk_bytes));
+    }
+}
+
+#[cfg(test)]
+mod coverage_tests {
+    use super::*;
+    use crate::params::get_threshold_params;
+    use rand::rngs::StdRng;
+    use rand::SeedableRng;
+
+    #[test]
+    fn rejects_wrong_lengths_and_too_many_subsets() {
+        let mut rng = StdRng::seed_from_u64(5);
+        let params = get_threshold_params(2, 3).unwrap();
+        assert_eq!(share_existing_key(&[0u8; 10], &params, &mut rng).err(), Some(Error::InvalidParameters));
+
+        // share_vectors on its own: more subsets than the sampler supports.
+        let (_, sk) = crate::verify::keygen(&[6u8; 32]);
+        use dilithium::{packing::unpack_sk, polyvec::{PolyVecK as DK, PolyVecL as DL}, ML_DSA_44};
+        let (mut rho, mut tr, mut key) = ([0u8; 32], [0u8; TRBYTES], [0u8; 32]);
+        let (mut t0, mut s1, mut s2) = (DK::default(), DL::default(), DK::default());
+        unpack_sk(ML_DSA_44, &mut rho, &mut tr, &mut key, &mut t0, &mut s1, &mut s2, &sk);
+        let mut v1 = PolyVecL::zero();
+        for i in 0..L {
+            v1.polys[i].coeffs.copy_from_slice(&s1.vec[i].coeffs[..N]);
+        }
+        let mut v2 = PolyVecK::zero();
+        for i in 0..K {
+            v2.polys[i].coeffs.copy_from_slice(&s2.vec[i].coeffs[..N]);
+        }
+        let big = ThresholdParams { t: 5, n: 9, ..params }; // C(9, 5) = 126 > 70
+        assert_eq!(
+            share_vectors(&v1, &v2, &rho, &tr, &sk, &big, &mut rng).err(),
+            Some(Error::InvalidParameters)
+        );
+    }
+}
+
+#[cfg(test)]
+mod tr_tests {
+    use super::*;
+    use crate::params::get_threshold_params;
+    use rand::rngs::StdRng;
+    use rand::SeedableRng;
+
+    #[test]
+    fn rejects_key_whose_tr_does_not_match() {
+        let (_, sk) = crate::verify::keygen(&[23u8; 32]);
+        let mut bad = sk.to_vec();
+        bad[64] ^= 1; // tr starts after ρ ‖ K
+        let params = get_threshold_params(2, 3).unwrap();
+        let mut rng = StdRng::seed_from_u64(23);
+        assert_eq!(share_existing_key(&bad, &params, &mut rng).err(), Some(Error::InvalidParameters));
     }
 }

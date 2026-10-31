@@ -17,7 +17,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let seed = [42u8; 32]; // use OsRng in production
 
     // Create a 2-of-3 threshold SDK
-    let sdk = ThresholdMlDsa44Sdk::from_seed(
+    let mut sdk = ThresholdMlDsa44Sdk::from_seed(
         &seed,
         2,   // T (threshold)
         3,   // N (total parties)
@@ -41,12 +41,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 ### `ThresholdMlDsa44Sdk::from_seed(seed, t, n, max_retries)`
 
 Generate fresh threshold keys from a 32-byte seed. This follows the paper's
-Figure 4 keygen: each RSS subset gets an independently sampled secret.
+Fig. 5 (USENIX version) keygen: each RSS subset gets an independently sampled secret.
 
 **Parameters:**
 - `seed: &[u8; 32]` — deterministic seed (use `OsRng` in production)
 - `t: u8` — threshold (minimum parties to sign, 2 ≤ T ≤ N)
-- `n: u8` — total parties (2 ≤ N ≤ 6)
+- `n: u8` — total parties (2 ≤ N ≤ 8; (5,8), (6,8), (7,8) unsupported)
 - `max_retries: usize` — max full-protocol retry attempts
 
 **Returns:** `Result<Self, Error>`
@@ -82,9 +82,23 @@ and advanced distributed orchestration.
 > When using low-level rounds, callers must enforce per-peer Round-2 reveal checks
 > and authenticated/replay-protected transport.
 
+### `ThresholdMlDsa44Sdk::from_existing_key(sk_bytes, t, n, max_retries, rng)`
+
+Share an existing ML-DSA-44 secret key (2560 bytes) without changing its
+public key, using the paper's Gaussian a posteriori sharing (§3.4). The paper
+estimates the security loss at up to 12 bits. See `aposteriori`.
+
+### `ThresholdMlDsa44Sdk::from_party_keys(pk, sks, max_retries)`
+
+Build an SDK from existing party keys, e.g. from `dkg::simulate` or parsed
+with `ThresholdPrivateKey::from_bytes`. All N keys must be for the same
+(T, N) and public key.
+
 ### `sdk.threshold_sign(active, msg, rng)`
 
 Perform a full 3-round threshold signing protocol with K parallel repetitions.
+Takes `&mut self`: the SDK keeps an `InMemoryNonceGuard` that refuses a
+repeated Round 1 session and mixes a counter into every nonce.
 
 **Parameters:**
 - `active: &[u8]` — sorted list of T active signer IDs
@@ -108,7 +122,7 @@ Verify a signature using the standard ML-DSA-44 verifier.
 ```
 from_seed(seed, T, N)
   └── rss::keygen_from_seed()
-       ├── Derive ρ, per-party keys from SHAKE-256(seed)
+       ├── Derive ρ, per-party keys from SHAKE-256(seed ‖ K ‖ L) (matches Go)
        ├── For each (N-T+1)-subset (Gosper's hack):
        │     sample s_I ← χ_s independently
        ├── Compute s_total = Σ s_I
@@ -129,12 +143,14 @@ threshold_sign(active, msg, rng)
 
 ## Supported Configurations
 
-All (T, N) pairs with 2 ≤ T ≤ N ≤ 6 are supported, using exact parameters
-from ePrint 2026/013, Figure 8.
+All (T, N) pairs with 2 ≤ T ≤ N ≤ 6 use the parameters of the ePrint
+2026/013 full version (values as in the Go reference). For N = 7, 8, all
+pairs except (5,8), (6,8), (7,8) are supported with parameters derived by the
+reference script; see the README for K and costs.
 
 ## Security Model
 
-- **No key decomposition**: Keys are generated fresh, not split from an existing ML-DSA key.
+- **Key sources**: fresh keys (`from_seed`, DKG) or, with a 7–12-bit security loss, a one-time Gaussian sharing of an existing ML-DSA key (`from_existing_key`; never share the same key twice).
 - **Fail-closed**: `Ok(sig)` is always verified before return; unsuccessful attempts return an error instead of an invalid signature.
 - **Read-only SDK surface**: internal key material/parameter fields are not publicly mutable; use accessor methods for inspection.
 - **In-process orchestrator**: The SDK runs all parties in-process. For distributed

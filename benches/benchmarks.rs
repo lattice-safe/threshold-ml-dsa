@@ -3,12 +3,9 @@
 use rand::rngs::StdRng;
 use rand::SeedableRng;
 use std::time::Instant;
-use threshold_ml_dsa::{
-    dkg,
-    params::SK_BYTES,
-    sdk::ThresholdMlDsa44Sdk,
-    verify,
-};
+use threshold_ml_dsa::params::SK_BYTES;
+use threshold_ml_dsa::dkg;
+use threshold_ml_dsa::{sdk::ThresholdMlDsa44Sdk, verify};
 
 fn main() {
     println!("\n==========================================================");
@@ -48,37 +45,34 @@ fn main() {
         println!("  Fresh Keygen ({}, {}): {:8.2?} / op", t, n, per_op);
     }
 
-    // ─── 2. A Posteriori Key Sharing Benchmarks ───────────────────────────
-    println!("\n--- 2. A Posteriori Key Sharing (from_existing_key) ---");
-    let (pk_std, sk_std) = verify::keygen(&[99u8; 32]);
-    let mut sk_fixed = [0u8; SK_BYTES];
-    sk_fixed.copy_from_slice(&sk_std);
+    {
+        // ─── 2. A Posteriori Key Sharing Benchmarks ───────────────────────────
+        println!("\n--- 2. A Posteriori Key Sharing (from_existing_key) ---");
+        let (_pk_std, sk_std) = verify::keygen(&[99u8; 32]);
+        let mut sk_fixed = [0u8; SK_BYTES];
+        sk_fixed.copy_from_slice(&sk_std);
 
-    for &(t, n) in &[(2, 2), (2, 3), (3, 4), (5, 6)] {
-        let iters = 100;
-        let start = Instant::now();
-        for _ in 0..iters {
-            let _ = ThresholdMlDsa44Sdk::from_existing_key(&sk_fixed, &[1u8; 32], t, n, 10).unwrap();
+        let mut rng = StdRng::seed_from_u64(2);
+        for &(t, n) in &[(2, 2), (2, 3), (3, 4), (4, 6), (5, 6)] {
+            let iters = 10;
+            let start = Instant::now();
+            for _ in 0..iters {
+                let _ = ThresholdMlDsa44Sdk::from_existing_key(&sk_fixed, t, n, 10, &mut rng).unwrap();
+            }
+            let elapsed = start.elapsed();
+            let per_op = elapsed / iters as u32;
+            println!("  A Posteriori Sharing ({}, {}): {:8.2?} / op", t, n, per_op);
         }
-        let elapsed = start.elapsed();
-        let per_op = elapsed / iters as u32;
-        println!("  A Posteriori Sharing ({}, {}): {:8.2?} / op", t, n, per_op);
     }
 
     // ─── 3. Distributed Key Generation (DKG) Benchmarks ──────────────────
-    println!("\n--- 3. Distributed Key Generation (DKG) ---");
+    // All N parties simulated in one process: total work across parties.
+    println!("\n--- 3. Distributed Key Generation (DKG, all parties) ---");
     for &(t, n) in &[(2, 3), (3, 4), (5, 6)] {
-        let iters = 50;
+        let iters = 20;
         let start = Instant::now();
         for _ in 0..iters {
-            let mut contribs = Vec::new();
-            let mut commits = Vec::new();
-            for i in 0..n {
-                let (c, h) = dkg::dkg_round1(i, &mut rng).unwrap();
-                contribs.push((i, c));
-                commits.push((i, h));
-            }
-            let _ = ThresholdMlDsa44Sdk::from_dkg(&contribs, &commits, t, n, 10).unwrap();
+            let _ = dkg::simulate(t, n, [0u8; 32], &mut rng).unwrap();
         }
         let elapsed = start.elapsed();
         let per_op = elapsed / iters as u32;
@@ -89,7 +83,7 @@ fn main() {
     println!("\n--- 4. Threshold Signing (threshold_sign) ---");
     for &(t, n) in configs {
         let seed = [t * 10 + n; 32];
-        let sdk = ThresholdMlDsa44Sdk::from_seed(&seed, t, n, 100).unwrap();
+        let mut sdk = ThresholdMlDsa44Sdk::from_seed(&seed, t, n, 100).unwrap();
         let active: Vec<u8> = (0..t).collect();
 
         // Warmup
@@ -107,7 +101,7 @@ fn main() {
 
     // ─── 5. FIPS 204 Signature Verification Benchmarks ─────────────────────
     println!("\n--- 5. Signature Verification (verify) ---");
-    let sdk = ThresholdMlDsa44Sdk::from_seed(&[1u8; 32], 2, 3, 10).unwrap();
+    let mut sdk = ThresholdMlDsa44Sdk::from_seed(&[1u8; 32], 2, 3, 10).unwrap();
     let sig_th = sdk.threshold_sign(&[0, 1], msg, &mut rng).unwrap();
 
     let iters = 500;
@@ -121,7 +115,7 @@ fn main() {
 
     // Standard ML-DSA-65 & 87 verify
     let (pk65, sk65) = verify::keygen_65(&[2u8; 32]);
-    let sig65 = verify::sign_standard_65(msg, &sk65, &[3u8; 32]);
+    let sig65 = verify::sign_standard_65(msg, &sk65, &[3u8; 32]).unwrap();
     let start = Instant::now();
     for _ in 0..iters {
         let _ = verify::verify_65(&sig65, msg, &pk65);
@@ -129,7 +123,7 @@ fn main() {
     println!("  Standard FIPS 204 Verify (Level 3 / 65):        {:8.2?} / op", start.elapsed() / iters as u32);
 
     let (pk87, sk87) = verify::keygen_87(&[4u8; 32]);
-    let sig87 = verify::sign_standard_87(msg, &sk87, &[5u8; 32]);
+    let sig87 = verify::sign_standard_87(msg, &sk87, &[5u8; 32]).unwrap();
     let start = Instant::now();
     for _ in 0..iters {
         let _ = verify::verify_87(&sig87, msg, &pk87);

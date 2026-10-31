@@ -537,7 +537,7 @@ fn test_keygen_different_seeds() {
 fn test_sign_standard_produces_valid_size() {
     let seed = [42u8; 32];
     let (_, sk) = verify::keygen(&seed);
-    let sig = verify::sign_standard(b"test", &sk, &[0u8; 32]);
+    let sig = verify::sign_standard(b"test", &sk, &[0u8; 32]).unwrap();
     assert_eq!(sig.len(), SIG_BYTES, "signature size");
 }
 
@@ -546,7 +546,7 @@ fn test_standard_sign_verify_roundtrip() {
     let seed = [99u8; 32];
     let (pk, sk) = verify::keygen(&seed);
     let msg = b"roundtrip verification test";
-    let sig = verify::sign_standard(msg, &sk, &[7u8; 32]);
+    let sig = verify::sign_standard(msg, &sk, &[7u8; 32]).unwrap();
     assert!(
         verify::verify(&sig, msg, &pk),
         "valid signature should verify"
@@ -557,7 +557,7 @@ fn test_standard_sign_verify_roundtrip() {
 fn test_verify_wrong_message() {
     let seed = [50u8; 32];
     let (pk, sk) = verify::keygen(&seed);
-    let sig = verify::sign_standard(b"correct", &sk, &[1u8; 32]);
+    let sig = verify::sign_standard(b"correct", &sk, &[1u8; 32]).unwrap();
     assert!(!verify::verify(&sig, b"wrong", &pk));
 }
 
@@ -565,7 +565,7 @@ fn test_verify_wrong_message() {
 fn test_verify_wrong_key() {
     let (pk1, sk1) = verify::keygen(&[10u8; 32]);
     let (pk2, _) = verify::keygen(&[20u8; 32]);
-    let sig = verify::sign_standard(b"msg", &sk1, &[0u8; 32]);
+    let sig = verify::sign_standard(b"msg", &sk1, &[0u8; 32]).unwrap();
     assert!(verify::verify(&sig, b"msg", &pk1), "correct key");
     assert!(!verify::verify(&sig, b"msg", &pk2), "wrong key");
 }
@@ -574,7 +574,7 @@ fn test_verify_wrong_key() {
 fn test_verify_corrupted_signature() {
     let seed = [60u8; 32];
     let (pk, sk) = verify::keygen(&seed);
-    let mut sig = verify::sign_standard(b"msg", &sk, &[0u8; 32]);
+    let mut sig = verify::sign_standard(b"msg", &sk, &[0u8; 32]).unwrap();
     sig[10] ^= 0xFF;
     assert!(
         !verify::verify(&sig, b"msg", &pk),
@@ -587,7 +587,7 @@ fn test_verify_empty_message() {
     let seed = [70u8; 32];
     let (pk, sk) = verify::keygen(&seed);
     let msg: &[u8] = b"";
-    let sig = verify::sign_standard(msg, &sk, &[0u8; 32]);
+    let sig = verify::sign_standard(msg, &sk, &[0u8; 32]).unwrap();
     assert!(verify::verify(&sig, msg, &pk), "empty message should work");
 }
 
@@ -596,8 +596,8 @@ fn test_sign_deterministic() {
     let seed = [80u8; 32];
     let (_, sk) = verify::keygen(&seed);
     let rng_seed = [5u8; 32];
-    let sig1 = verify::sign_standard(b"test", &sk, &rng_seed);
-    let sig2 = verify::sign_standard(b"test", &sk, &rng_seed);
+    let sig1 = verify::sign_standard(b"test", &sk, &rng_seed).unwrap();
+    let sig2 = verify::sign_standard(b"test", &sk, &rng_seed).unwrap();
     assert_eq!(sig1, sig2, "same inputs → same signature");
 }
 

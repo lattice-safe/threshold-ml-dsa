@@ -13,7 +13,7 @@ extern crate alloc;
 use alloc::vec::Vec;
 
 use crate::error::Error;
-use crate::params::{SIG_BYTES, CTILDEBYTES, L, POLYZ_PACKEDBYTES, PK_BYTES, ThresholdParams, TRBYTES, K, GAMMA1, BETA, N, Q, GAMMA2, OMEGA, POLYW1_PACKEDBYTES};
+use crate::params::{MAX_PARTIES, SIG_BYTES, CTILDEBYTES, L, POLYZ_PACKEDBYTES, PK_BYTES, ThresholdParams, TRBYTES, K, GAMMA1, BETA, N, Q, GAMMA2, OMEGA, POLYW1_PACKEDBYTES};
 use crate::poly::{PolyVecL, PolyVecK};
 use crate::sign;
 use crate::verify;
@@ -36,8 +36,22 @@ pub struct Signature {
 
 impl Signature {
     /// Encode the signature into the standard FIPS 204 byte format.
-    #[must_use] 
-    pub fn to_bytes(&self) -> Vec<u8> {
+    ///
+    /// Fails if `c_tilde` or `h` have the wrong length, or a coefficient of
+    /// `z` (taken mod q and centered) is outside (−γ₁, γ₁] and so has no
+    /// 18-bit encoding.
+    pub fn to_bytes(&self) -> Result<Vec<u8>, Error> {
+        if self.c_tilde.len() != CTILDEBYTES || self.h.len() != OMEGA + K {
+            return Err(Error::InvalidParameters);
+        }
+        let out_of_range = self.z.polys.iter().flat_map(|p| p.coeffs.iter()).any(|&c| {
+            let r = c.rem_euclid(Q);
+            let centered = if r > (Q - 1) / 2 { r - Q } else { r };
+            centered <= -GAMMA1 || centered > GAMMA1
+        });
+        if out_of_range {
+            return Err(Error::InvalidParameters);
+        }
         let mut sig = alloc::vec![0u8; SIG_BYTES];
         sig[..CTILDEBYTES].copy_from_slice(&self.c_tilde);
         let mut offset = CTILDEBYTES;
@@ -46,22 +60,43 @@ impl Signature {
             offset += POLYZ_PACKEDBYTES;
         }
         sig[offset..offset + self.h.len()].copy_from_slice(&self.h);
-        sig
+        Ok(sig)
     }
+}
+
+/// Reject party-supplied vectors with coefficients outside `[0, q)`.
+///
+/// Honest parties only ever produce canonical coefficients; anything else
+/// would overflow the i32 sums below.
+fn check_canonical<'a>(polys: impl IntoIterator<Item = &'a crate::poly::Poly>) -> Result<(), Error> {
+    for p in polys {
+        if p.coeffs.iter().any(|&c| !(0..Q).contains(&c)) {
+            return Err(Error::InvalidShare);
+        }
+    }
+    Ok(())
 }
 
 /// Aggregate K commitment vectors from T parties.
 ///
 /// For each k ∈ [0, K): wfinal[k] = `Σ_i` w_{i,k}
 ///
-/// Returns `Err(InvalidParameters)` if any party has fewer than `k_reps` reveals.
+/// Returns `Err(InvalidParameters)` if there are more than `MAX_PARTIES`
+/// parties (the i32 sums could overflow) or any party has fewer than
+/// `k_reps` reveals.
 pub fn aggregate_commitments(
     all_reveals: &[Vec<PolyVecK>], // [T parties][K slots]
     k_reps: usize,
 ) -> Result<Vec<PolyVecK>, Error> {
+    if all_reveals.len() > MAX_PARTIES {
+        return Err(Error::InvalidParameters);
+    }
     for party_reveals in all_reveals {
         if party_reveals.len() < k_reps {
             return Err(Error::InvalidParameters);
+        }
+        for w in &party_reveals[..k_reps] {
+            check_canonical(&w.polys)?;
         }
     }
     let mut wfinals: Vec<PolyVecK> = Vec::with_capacity(k_reps);
@@ -80,14 +115,21 @@ pub fn aggregate_commitments(
 ///
 /// For each k ∈ [0, K): zfinal[k] = `Σ_i` z_{i,k}
 ///
-/// Returns `Err(InvalidParameters)` if any party has fewer than `k_reps` responses.
+/// Returns `Err(InvalidParameters)` if there are more than `MAX_PARTIES`
+/// parties or any party has fewer than `k_reps` responses.
 pub fn aggregate_responses(
     all_responses: &[Vec<PolyVecL>], // [T parties][K slots]
     k_reps: usize,
 ) -> Result<Vec<PolyVecL>, Error> {
+    if all_responses.len() > MAX_PARTIES {
+        return Err(Error::InvalidParameters);
+    }
     for party_responses in all_responses {
         if party_responses.len() < k_reps {
             return Err(Error::InvalidParameters);
+        }
+        for z in &party_responses[..k_reps] {
+            check_canonical(&z.polys)?;
         }
     }
     let mut zfinals: Vec<PolyVecL> = Vec::with_capacity(k_reps);
@@ -108,7 +150,7 @@ pub fn aggregate_responses(
 /// For each slot k:
 /// 1. Check ‖`z_k`‖∞ < γ₁ - β
 /// 2. Compute `Az_k` - 2^d·c·t₁ = "approximated w"  
-/// 3. Check ‖δ‖∞ = ‖`approx_w` - `w_final`‖∞ < γ₂
+/// 3. Check ‖δ‖∞ = ‖`approx_w` - `w_final`‖∞ ≤ γ₂ (Fig. 7 aborts only if > γ₂)
 /// 4. Compute hints
 /// 5. If ω hints ≤ OMEGA, pack and return
 pub fn combine(
@@ -118,9 +160,16 @@ pub fn combine(
     zfinals: &[PolyVecL],
     params: &ThresholdParams,
 ) -> Result<[u8; SIG_BYTES], Error> {
+    params.validate()?;
     let k_reps = params.k_reps as usize;
     if wfinals.len() < k_reps || zfinals.len() < k_reps {
         return Err(Error::InvalidParameters);
+    }
+    for w in &wfinals[..k_reps] {
+        check_canonical(&w.polys)?;
+    }
+    for z in &zfinals[..k_reps] {
+        check_canonical(&z.polys)?;
     }
     use dilithium::{
         packing::{pack_sig, unpack_pk},
@@ -278,9 +327,10 @@ pub fn combine(
         let mut sig = [0u8; SIG_BYTES];
         pack_sig(mode, &mut sig, &c_tilde, &z_d, &hint);
 
-        if verify::verify(&sig, msg, pk_bytes) {
-            return Ok(sig);
-        }
+        // Fail closed. With ‖w − r‖∞ ≤ γ₂ checked above, UseHint recovers
+        // HighBits(w) and this always verifies; it guards against bugs only
+        // (so no test input can reach the fall-through).
+        if verify::verify(&sig, msg, pk_bytes) { return Ok(sig); }
     }
 
     Err(Error::InsufficientResponses)
@@ -401,5 +451,94 @@ mod tests {
         let party0 = vec![z.clone()]; // only 1 slot
         let result = aggregate_responses(&[party0], 2); // asks for 2
         assert!(result.is_err());
+    }
+}
+
+#[cfg(test)]
+mod coverage_tests {
+    use super::*;
+    use crate::params::get_threshold_params;
+    use crate::rss::keygen_from_seed;
+
+    #[test]
+    fn signature_to_bytes_checks_lengths() {
+        let sig = Signature { c_tilde: alloc::vec![1u8; CTILDEBYTES], z: PolyVecL::zero(), h: alloc::vec![0u8; OMEGA + K] };
+        let bytes = sig.to_bytes().unwrap();
+        assert_eq!(bytes.len(), SIG_BYTES);
+        assert_eq!(&bytes[..CTILDEBYTES], &sig.c_tilde[..]);
+        let short = Signature { c_tilde: alloc::vec![0u8; 3], z: PolyVecL::zero(), h: alloc::vec![0u8; OMEGA + K] };
+        assert_eq!(short.to_bytes().err(), Some(Error::InvalidParameters));
+        let bad_h = Signature { c_tilde: alloc::vec![0u8; CTILDEBYTES], z: PolyVecL::zero(), h: alloc::vec![] };
+        assert_eq!(bad_h.to_bytes().err(), Some(Error::InvalidParameters));
+    }
+
+    #[test]
+    fn combine_rejects_short_input_and_reports_failure() {
+        let params = get_threshold_params(2, 2).unwrap();
+        let (pk, _) = keygen_from_seed(&[4u8; 32], &params).unwrap();
+        let k = params.k_reps as usize;
+        let w = alloc::vec![PolyVecK::zero(); k];
+        let z = alloc::vec![PolyVecL::zero(); k];
+        assert_eq!(combine(&pk, b"m", &w[..k - 1], &z, &params).err(), Some(Error::InvalidParameters));
+        assert_eq!(combine(&pk, b"m", &w, &z[..k - 1], &params).err(), Some(Error::InvalidParameters));
+        // Well-formed but meaningless input: no slot verifies.
+        assert_eq!(combine(&pk, b"m", &w, &z, &params).err(), Some(Error::InsufficientResponses));
+    }
+}
+
+#[cfg(test)]
+mod input_tests {
+    use super::*;
+    use crate::params::get_threshold_params;
+    use crate::rss::keygen_from_seed;
+
+    #[test]
+    fn non_canonical_and_oversized_inputs() {
+        let mut w = PolyVecK::zero();
+        w.polys[0].coeffs[0] = Q;
+        assert_eq!(aggregate_commitments(&[alloc::vec![w]], 1).err(), Some(Error::InvalidShare));
+
+        let params = get_threshold_params(2, 2).unwrap();
+        let (pk, _) = keygen_from_seed(&[18u8; 32], &params).unwrap();
+        let k = params.k_reps as usize;
+        let ws = alloc::vec![PolyVecK::zero(); k];
+        let mut z = PolyVecL::zero();
+        z.polys[0].coeffs[0] = GAMMA1; // ‖z‖∞ ≥ γ₁ − β in every slot
+        let zs = alloc::vec![z; k];
+        assert_eq!(combine(&pk, b"m", &ws, &zs, &params).err(), Some(Error::InsufficientResponses));
+    }
+}
+
+#[cfg(test)]
+mod review_tests {
+    use super::*;
+
+    #[test]
+    fn to_bytes_rejects_unencodable_z_and_extreme_values() {
+        let mut z = PolyVecL::zero();
+        z.polys[0].coeffs[0] = GAMMA1 + 5;
+        let sig = Signature { c_tilde: alloc::vec![0u8; CTILDEBYTES], z, h: alloc::vec![0u8; OMEGA + K] };
+        assert_eq!(sig.to_bytes().err(), Some(Error::InvalidParameters));
+        let mut z = PolyVecL::zero();
+        z.polys[0].coeffs[0] = i32::MAX; // ≡ 2 096 895 mod q: out of range
+        z.polys[1].coeffs[0] = i32::MIN;
+        let sig = Signature { c_tilde: alloc::vec![0u8; CTILDEBYTES], z, h: alloc::vec![0u8; OMEGA + K] };
+        assert_eq!(sig.to_bytes().err(), Some(Error::InvalidParameters));
+        let mut z = PolyVecL::zero();
+        z.polys[0].coeffs[0] = Q - GAMMA1 + 1; // ≡ −(γ₁ − 1): encodable
+        let sig = Signature { c_tilde: alloc::vec![0u8; CTILDEBYTES], z, h: alloc::vec![0u8; OMEGA + K] };
+        assert!(sig.to_bytes().is_ok());
+        // chknorm no longer overflows on extreme inputs.
+        let mut z = PolyVecL::zero();
+        z.polys[0].coeffs[0] = i32::MAX;
+        assert!(z.chknorm(GAMMA1));
+    }
+
+    #[test]
+    fn aggregation_rejects_too_many_parties() {
+        let w = alloc::vec![alloc::vec![PolyVecK::zero()]; MAX_PARTIES + 1];
+        assert_eq!(aggregate_commitments(&w, 1).err(), Some(Error::InvalidParameters));
+        let z = alloc::vec![alloc::vec![PolyVecL::zero()]; MAX_PARTIES + 1];
+        assert_eq!(aggregate_responses(&z, 1).err(), Some(Error::InvalidParameters));
     }
 }

@@ -133,13 +133,17 @@ pub mod ml_dsa_87 {
 // ─── Threshold-specific parameters (ePrint 2026/013) ─────────────────
 
 /// Maximum number of parties supported by the RSS scheme (N ≤ 8).
+///
+/// ePrint 2026/013 gives parameters for N ≤ 6; N = 7, 8 are derived here
+/// with the reference scripts (see [`get_threshold_params`]). Not every
+/// (T, 8) is supported.
 pub const MAX_PARTIES: usize = 8;
 
 /// Dimension of the `FVec` float vector: (K+L)×N coefficients.
 pub const FVEC_DIM: usize = (K + L) * N;
 
 /// Threshold-specific parameters for a given (T, N) pair.
-/// From ePrint 2026/013, Figure 8 (ML-DSA-44), extended for N ≤ 8.
+/// From ePrint 2026/013 full version (ML-DSA-44; values as in the Go reference).
 ///
 /// - `r`: target hyperball radius for `χ_z`
 /// - `r1`: randomness hyperball radius for `χ_r`  
@@ -161,19 +165,49 @@ pub struct ThresholdParams {
     pub nu: f64,
 }
 
+impl ThresholdParams {
+    /// Check that these parameters are exactly the canonical set for (T, N).
+    ///
+    /// The fields are public, so callers can build arbitrary values; a radius
+    /// of NaN or +∞ would disable hyperball rejection and release every
+    /// response. Protocol entry points call this before using `self`.
+    pub fn validate(&self) -> Result<(), crate::error::Error> {
+        let canon = get_threshold_params(self.t, self.n).ok_or(crate::error::Error::InvalidParameters)?;
+        if self.k_reps != canon.k_reps
+            || self.r.to_bits() != canon.r.to_bits()
+            || self.r1.to_bits() != canon.r1.to_bits()
+            || self.nu.to_bits() != canon.nu.to_bits()
+        {
+            return Err(crate::error::Error::InvalidParameters);
+        }
+        Ok(())
+    }
+}
+
 /// Lookup the paper parameters for a given (T, N) pair.
 ///
-/// Returns `None` if (T, N) is not in the supported range
-/// (2 ≤ T ≤ N ≤ 8).
+/// Returns `None` if (T, N) is unsupported: outside 2 ≤ T ≤ N ≤ 8, or one
+/// of (5, 8), (6, 8), (7, 8).
 ///
-/// Parameters from ePrint 2026/013, Figure 8 (ML-DSA-44), extended for N=7,8.
+/// N ≤ 6: ePrint 2026/013 full version, Fig. 9 (values as in the Go
+/// reference). Note that Fig. 9's (2,4), (4,5), (5,5) radii correspond to
+/// ν = 3.5, 2.5, 2.5 in the reference script, and its K for (4,6), (5,6),
+/// (6,6) is below what the script gives (per-attempt success ≈ 0.39–0.46
+/// instead of 1/2); these values are kept for compatibility.
+///
+/// N = 7, 8: derived with the reference script `params/hyperball.sage`
+/// (ν = 3, per-attempt success 1/2, Monte Carlo for the final-check
+/// probabilities) and the max-flow partitions of `params/recover.py`. K is
+/// the value at the −2σ lower bound of the estimated success probability.
+/// Per party and attempt, communication is about 32 + 5248·K bytes and
+/// signer state about 19.3 KB·K: e.g. (4, 8) ≈ 6.3 MB / 23 MB. (5, 8),
+/// (6, 8) and (7, 8) would need K = 14 785, 38 473 and 5 162 (76–198 MB of
+/// traffic, 98–728 MB of memory per attempt) and are not supported.
+///
 /// All sets use the same multiplicative factor ν = 3.
 #[must_use] 
 pub fn get_threshold_params(t: u8, n: u8) -> Option<ThresholdParams> {
-    if t < 2 || t > n || n > 8 {
-        return None;
-    }
-
+    // The table below lists exactly the supported (T, N).
     let nu = 3.0_f64;
 
     let (r, r1, k_reps) = match (t, n) {
@@ -192,21 +226,16 @@ pub fn get_threshold_params(t: u8, n: u8) -> Option<ThresholdParams> {
         (4, 6) => (268705.0, 268831.0, 74),
         (5, 6) => (250590.0, 250686.0, 100),
         (6, 6) => (219245.0, 219301.0, 37),
-        // N = 7 parameters (extended)
-        (2, 7) => (310000.0, 310100.0, 5),
-        (3, 7) => (280000.0, 280100.0, 25),
-        (4, 7) => (270000.0, 270100.0, 80),
-        (5, 7) => (260000.0, 260100.0, 110),
-        (6, 7) => (240000.0, 240100.0, 120),
-        (7, 7) => (210000.0, 210050.0, 45),
-        // N = 8 parameters (extended)
-        (2, 8) => (320000.0, 320100.0, 6),
-        (3, 8) => (290000.0, 290100.0, 30),
-        (4, 8) => (275000.0, 275100.0, 90),
-        (5, 8) => (265000.0, 265100.0, 125),
-        (6, 8) => (250000.0, 250100.0, 135),
-        (7, 8) => (230000.0, 230100.0, 150),
-        (8, 8) => (200000.0, 200050.0, 50),
+        (2, 7) => (313939.0, 314051.0, 4),
+        (3, 7) => (285453.0, 285601.0, 31),
+        (4, 7) => (261941.0, 262110.0, 322),
+        (5, 7) => (241018.0, 241166.0, 1071),
+        (6, 7) => (220521.0, 220633.0, 1008),
+        (7, 7) => (192000.0, 192055.0, 91),
+        (2, 8) => (313939.0, 314051.0, 4),
+        (3, 8) => (291228.0, 291406.0, 58),
+        (4, 8) => (267837.0, 268048.0, 1195),
+        (8, 8) => (182918.0, 182974.0, 227),
         _ => return None,
     };
 
@@ -240,9 +269,12 @@ pub const fn binomial(n: u8, k: u8) -> usize {
     result
 }
 
-/// Number of RSS subsets for a given (N, T): C(N, N-T+1)
+/// Number of RSS subsets for a given (N, T): C(N, N-T+1); 0 unless 1 ≤ T ≤ N.
 #[must_use] 
 pub const fn num_subsets(n: u8, t: u8) -> usize {
+    if t == 0 || t > n {
+        return 0;
+    }
     binomial(n, n - t + 1)
 }
 
@@ -257,7 +289,7 @@ mod tests {
 
     #[test]
     fn test_all_param_sets_exist() {
-        // All 15 valid (T, N) pairs from Figure 8
+        // All 15 valid (T, N) pairs from the parameter table
         let valid = [
             (2, 2),
             (2, 3),
@@ -276,8 +308,9 @@ mod tests {
             (6, 6),
         ];
         for (t, n) in valid {
-            let p = get_threshold_params(t, n)
-                .unwrap_or_else(|| panic!("Missing params for ({}, {})", t, n));
+            let p = get_threshold_params(t, n);
+            assert!(p.is_some(), "Missing params for ({t}, {n})");
+            let p = p.unwrap();
             assert!(p.r1 >= p.r, "r1 < r for ({}, {})", t, n);
             assert!(p.k_reps >= 2, "K < 2 for ({}, {})", t, n);
             assert!((p.nu - 3.0).abs() < 1e-10, "ν ≠ 3 for ({}, {})", t, n);
@@ -304,5 +337,56 @@ mod tests {
         assert_eq!(num_subsets(3, 2), 3); // C(3,2) = 3
         assert_eq!(num_subsets(4, 3), 6); // C(4,2) = 6
         assert_eq!(num_subsets(6, 2), 6); // C(6,5) = 6
+    }
+}
+
+#[cfg(test)]
+mod coverage_tests {
+    use super::*;
+
+    #[test]
+    fn unsupported_configurations_and_binomial_edges() {
+        assert!(get_threshold_params(1, 2).is_none());
+        assert!(get_threshold_params(3, 2).is_none());
+        assert!(get_threshold_params(2, 9).is_none());
+        assert!(get_threshold_params(5, 8).is_none()); // impractical K
+        assert_eq!(binomial(2, 3), 0);
+        assert_eq!(binomial(5, 0), 1);
+        assert_eq!(binomial(5, 5), 1);
+        assert_eq!(binomial(6, 4), 15);
+        let mut p = get_threshold_params(2, 3).unwrap();
+        assert!(p.validate().is_ok());
+        p.nu = f64::NAN;
+        assert!(p.validate().is_err());
+        p = get_threshold_params(2, 3).unwrap();
+        p.t = 7;
+        assert!(p.validate().is_err());
+    }
+}
+
+#[cfg(test)]
+mod review_tests {
+    use super::*;
+
+    #[test]
+    fn n7_n8_rows_exist_except_impractical_ones() {
+        for n in 7..=8u8 {
+            for t in 2..=n {
+                let unsupported = n == 8 && (5..=7).contains(&t);
+                let p = get_threshold_params(t, n);
+                assert_eq!(p.is_none(), unsupported, "({t}, {n})");
+                if let Some(p) = p {
+                    assert!(p.validate().is_ok() && p.r < p.r1 && p.k_reps >= 4);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn num_subsets_handles_invalid_input() {
+        assert_eq!(num_subsets(2, 5), 0);
+        assert_eq!(num_subsets(3, 0), 0);
+        assert_eq!(num_subsets(6, 3), 15); // C(6, 4)
+        assert_eq!(num_subsets(6, 4), 20); // C(6, 3)
     }
 }

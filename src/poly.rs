@@ -27,7 +27,8 @@ pub struct Poly {
 
 impl core::fmt::Debug for Poly {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        write!(f, "Poly([{}; {}])", self.coeffs[0], N)
+        // Never print coefficients: a Poly may hold secret material.
+        write!(f, "Poly([..; {N}])")
     }
 }
 
@@ -176,18 +177,18 @@ impl Poly {
 
         let mut buf = [0u8; 1];
         let mut ctr = 0;
-        // η = 2: sample from {0,1,2,3,4} then subtract η
+        // η = 2: FIPS 204 CoeffFromHalfByte accepts b < 15 and maps
+        // b ↦ η − (b mod 5).
         while ctr < N {
             reader.read(&mut buf);
             let t0 = i32::from(buf[0] & 0x0F);
             let t1 = i32::from(buf[0] >> 4);
-            if t0 < 5 {
-                // For η=2: coefficients are in {0,1,2,3,4} → map to {-2,-1,0,1,2}
-                a.coeffs[ctr] = ETA as i32 - t0;
+            if t0 < 15 {
+                a.coeffs[ctr] = ETA as i32 - t0 % 5;
                 ctr += 1;
             }
-            if ctr < N && t1 < 5 {
-                a.coeffs[ctr] = ETA as i32 - t1;
+            if ctr < N && t1 < 15 {
+                a.coeffs[ctr] = ETA as i32 - t1 % 5;
                 ctr += 1;
             }
         }
@@ -264,7 +265,7 @@ impl Poly {
 
     /// Pack t₁ polynomial (10 bits per coefficient).
     pub fn pack_t1(&self, r: &mut [u8]) {
-        debug_assert!(r.len() >= POLYT1_PACKEDBYTES);
+        assert!(r.len() >= POLYT1_PACKEDBYTES, "pack_t1: output buffer too short");
         for i in 0..N / 4 {
             r[5 * i] = (self.coeffs[4 * i] & 0xFF) as u8;
             r[5 * i + 1] = ((self.coeffs[4 * i] >> 8) | (self.coeffs[4 * i + 1] << 2)) as u8;
@@ -276,7 +277,7 @@ impl Poly {
 
     /// Unpack t₁ polynomial (10 bits per coefficient).
     pub fn unpack_t1(r: &mut Poly, a: &[u8]) {
-        debug_assert!(a.len() >= POLYT1_PACKEDBYTES);
+        assert!(a.len() >= POLYT1_PACKEDBYTES, "unpack_t1: input too short");
         for i in 0..N / 4 {
             r.coeffs[4 * i] = (i32::from(a[5 * i]) | (i32::from(a[5 * i + 1]) << 8)) & 0x3FF;
             r.coeffs[4 * i + 1] =
@@ -290,14 +291,16 @@ impl Poly {
 
     /// Pack z polynomial (coefficients in [-(γ₁-1), γ₁], 18 bits each).
     ///
-    /// Coefficients must be in centered form. Computes t = γ₁ - coeff
-    /// which is always in [0, 2·γ₁] when ‖z‖∞ < γ₁.
+    /// Coefficients may be in any representative mod q; they are centered
+    /// first. Computes t = γ₁ - coeff, which is in [0, 2·γ₁] when ‖z‖∞ < γ₁.
     pub fn pack_z(&self, r: &mut [u8]) {
-        debug_assert!(r.len() >= POLYZ_PACKEDBYTES);
+        assert!(r.len() >= POLYZ_PACKEDBYTES, "pack_z: output buffer too short");
         let mut t = [0u32; 4];
         for i in 0..N / 4 {
             for (j, tv) in t.iter_mut().enumerate() {
-                *tv = (GAMMA1 - self.coeffs[4 * i + j]) as u32;
+                let c = center(self.coeffs[4 * i + j]);
+                debug_assert!(c.abs() <= GAMMA1);
+                *tv = (GAMMA1 - c) as u32;
             }
             r[9 * i] = t[0] as u8;
             r[9 * i + 1] = (t[0] >> 8) as u8;
@@ -313,7 +316,7 @@ impl Poly {
 
     /// Unpack z polynomial.
     pub fn unpack_z(r: &mut Poly, a: &[u8]) {
-        debug_assert!(a.len() >= POLYZ_PACKEDBYTES);
+        assert!(a.len() >= POLYZ_PACKEDBYTES, "unpack_z: input too short");
         for i in 0..N / 4 {
             r.coeffs[4 * i] =
                 i32::from(a[9 * i]) | (i32::from(a[9 * i + 1]) << 8) | (i32::from(a[9 * i + 2]) << 16);
@@ -555,8 +558,8 @@ impl MatrixA {
         for (i, row) in rows.iter_mut().enumerate().take(K) {
             for (j, poly) in row.iter_mut().enumerate().take(L) {
                 let nonce = ((i as u16) << 8) | (j as u16);
+                // FIPS 204 ExpandA samples Â directly in the NTT domain.
                 Poly::uniform(poly, rho, nonce);
-                poly.ntt();
             }
         }
         MatrixA { rows }
@@ -587,7 +590,8 @@ impl MatrixA {
 /// Faithful port of `reduce32` from the CRYSTALS-Dilithium reference.
 /// For a ≤ 2³¹ − 2²² − 1, computes r ≡ a (mod q) with −6283008 ≤ r ≤ 6283008.
 fn reduce32(a: i32) -> i32 {
-    let t = (a + (1 << 22)) >> 23;
+    // Widen so a + 2²² cannot overflow; |t| ≤ 256 keeps t·q within i32.
+    let t = ((i64::from(a) + (1 << 22)) >> 23) as i32;
     a - t * Q
 }
 
@@ -735,5 +739,167 @@ mod tests {
         let (a1, a0) = power2round(12345);
         // Verify reconstruction
         assert_eq!((a1 << D) + a0, 12345);
+    }
+}
+
+#[cfg(test)]
+mod coverage_tests {
+    use super::*;
+    extern crate alloc;
+    use alloc::format;
+
+    #[test]
+    fn defaults_and_debug_never_print_coefficients() {
+        let mut p = Poly::default();
+        p.coeffs[0] = 12345;
+        assert!(!format!("{p:?}").contains("12345"));
+        assert!(format!("{:?}", PolyVecL::default()).starts_with("PolyVecL"));
+        assert!(format!("{:?}", PolyVecK::default()).starts_with("PolyVecK"));
+    }
+
+    #[test]
+    fn vector_operations() {
+        let mut a = PolyVecL::zero();
+        let mut b = PolyVecL::zero();
+        a.polys[0].coeffs[0] = -5;
+        b.polys[L - 1].coeffs[1] = 7;
+        let mut c = PolyVecL::zero();
+        PolyVecL::add(&mut c, &a, &b);
+        assert_eq!((c.polys[0].coeffs[0], c.polys[L - 1].coeffs[1]), (-5, 7));
+        c.caddq();
+        assert_eq!(c.polys[0].coeffs[0], Q - 5);
+        let mut r = a.clone();
+        r.ntt();
+        r.invntt_tomont();
+        assert_eq!(r.polys.len(), L);
+
+        let mut x = PolyVecK::zero();
+        let mut y = PolyVecK::zero();
+        x.polys[0].coeffs[0] = 3;
+        y.polys[K - 1].coeffs[2] = -4;
+        let mut z = PolyVecK::zero();
+        PolyVecK::add(&mut z, &x, &y);
+        assert_eq!(z.l2_norm_squared(), 25);
+        assert_eq!(z.l_inf_norm(), 4);
+        assert!(z.chknorm(4));
+        assert!(!z.chknorm(5));
+        let mut d = PolyVecK::zero();
+        PolyVecK::sub(&mut d, &x, &y);
+        assert_eq!(d.polys[K - 1].coeffs[2], 4);
+        z.reduce();
+        z.caddq();
+        assert_eq!(z.polys[K - 1].coeffs[2], Q - 4);
+        let mut w = x.clone();
+        w.ntt();
+        w.invntt_tomont();
+        assert_eq!(w.polys.len(), K);
+    }
+
+    #[test]
+    fn hints_cover_all_branches() {
+        assert!(make_hint(GAMMA2 + 1, 0));
+        assert!(make_hint(-GAMMA2 - 1, 0));
+        assert!(make_hint(-GAMMA2, 1));
+        assert!(!make_hint(-GAMMA2, 0));
+        assert!(!make_hint(0, 5));
+
+        let mut seen = [false; 4];
+        let mut a = 0;
+        while a < Q && seen.iter().any(|s| !s) {
+            let (a1, a0) = decompose(a);
+            let h = use_hint(a, true);
+            let case = match (a0 > 0, a1) {
+                (true, 43) => { assert_eq!(h, 0); 0 }
+                (true, _) => { assert_eq!(h, a1 + 1); 1 }
+                (false, 0) => { assert_eq!(h, 43); 2 }
+                (false, _) => { assert_eq!(h, a1 - 1); 3 }
+            };
+            seen[case] = true;
+            assert_eq!(use_hint(a, false), a1);
+            a += 997;
+        }
+        assert!(seen.iter().all(|&s| s), "{seen:?}");
+    }
+}
+
+#[cfg(test)]
+mod sampling_tests {
+    use super::*;
+    extern crate alloc;
+
+    #[test]
+    fn samplers_stay_in_range_and_are_deterministic() {
+        let seed = [3u8; SEEDBYTES];
+        let crh = [4u8; CRHBYTES];
+        let (mut a, mut b) = (Poly::zero(), Poly::zero());
+        Poly::uniform(&mut a, &seed, 1);
+        Poly::uniform(&mut b, &seed, 1);
+        assert_eq!(a.coeffs, b.coeffs);
+        assert!(a.coeffs.iter().all(|c| (0..Q).contains(c)));
+
+        Poly::uniform_eta(&mut a, &crh, 2);
+        assert!(a.coeffs.iter().all(|c| c.abs() <= ETA as i32));
+
+        Poly::uniform_gamma1(&mut a, &crh, 3);
+        assert!(a.coeffs.iter().all(|c| *c > -GAMMA1 && *c <= GAMMA1));
+
+        Poly::challenge(&mut a, b"challenge seed");
+        assert_eq!(a.coeffs.iter().filter(|&&c| c != 0).count(), TAU as usize);
+        assert!(a.coeffs.iter().all(|&c| c == 0 || c == 1 || c == Q - 1)); // −1 is stored as q − 1
+    }
+
+    #[test]
+    fn packing_round_trips() {
+        let mut t1 = Poly::zero();
+        for (i, c) in t1.coeffs.iter_mut().enumerate() {
+            *c = (i as i32 * 37) & 0x3FF;
+        }
+        let mut buf = [0u8; POLYT1_PACKEDBYTES];
+        t1.pack_t1(&mut buf);
+        let mut back = Poly::zero();
+        Poly::unpack_t1(&mut back, &buf);
+        assert_eq!(back.coeffs, t1.coeffs);
+
+        let mut z = Poly::zero();
+        for (i, c) in z.coeffs.iter_mut().enumerate() {
+            *c = (i as i32 * 1021) % GAMMA1 - GAMMA1 / 2;
+        }
+        let mut buf = [0u8; POLYZ_PACKEDBYTES];
+        z.pack_z(&mut buf);
+        Poly::unpack_z(&mut back, &buf);
+        assert_eq!(back.coeffs, z.coeffs);
+    }
+
+    #[test]
+    fn polyvecl_norms_and_matrix_product() {
+        let mut a = PolyVecL::zero();
+        a.polys[1].coeffs[3] = -6;
+        a.polys[2].coeffs[4] = 2;
+        let mut d = PolyVecL::zero();
+        PolyVecL::sub(&mut d, &PolyVecL::zero(), &a);
+        assert_eq!(d.polys[1].coeffs[3], 6);
+        assert_eq!(a.l2_norm_squared(), 40);
+        assert_eq!(a.l_inf_norm(), 6);
+
+        let m = MatrixA::expand(&[9u8; SEEDBYTES]);
+        let mut x = PolyVecL::zero();
+        x.polys[0].coeffs[0] = 1;
+        x.ntt();
+        let mut y = PolyVecL::zero();
+        y.polys[3].coeffs[5] = 2;
+        y.ntt();
+        let mut s = PolyVecL::zero();
+        PolyVecL::add(&mut s, &x, &y);
+        // A·(x + y) = A·x + A·y (mod q)
+        let mut lhs = m.mul_vec(&s);
+        let mut rhs = PolyVecK::zero();
+        PolyVecK::add(&mut rhs, &m.mul_vec(&x), &m.mul_vec(&y));
+        lhs.reduce();
+        lhs.caddq();
+        rhs.reduce();
+        rhs.caddq();
+        assert_eq!(lhs.polys.iter().map(|p| p.coeffs).collect::<alloc::vec::Vec<_>>(),
+                   rhs.polys.iter().map(|p| p.coeffs).collect::<alloc::vec::Vec<_>>());
+        assert!(m.mul_vec(&PolyVecL::zero()).polys.iter().all(|p| p.coeffs.iter().all(|&c| c == 0)));
     }
 }

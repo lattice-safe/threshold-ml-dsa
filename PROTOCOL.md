@@ -3,10 +3,14 @@
 > **Based on:** FIPS 204 (ML-DSA) + ePrint 2026/013 (Mithril Scheme)
 >
 > This document describes the cryptographic protocol implemented in
-> `threshold-ml-dsa` v0.4.1, covering fresh key generation via Replicated
-> Secret Sharing (RSS), Distributed Key Generation (DKG), A Posteriori Key Sharing
-> of existing ML-DSA keys, the 3-round threshold signing protocol with K-parallel
-> hyperball commitments, ML-DSA-65/87 parameters, and FIPS 204-compatible verification.
+> `threshold-ml-dsa` v0.5.0, covering fresh key generation via Replicated
+> Secret Sharing (RSS), the 3-round threshold signing protocol with K-parallel
+> hyperball commitments for ML-DSA-44 with N ≤ 8, and FIPS 204-compatible
+> verification. The DKG (`dkg`) follows the structure of the full version's
+> App. D, Fig. 13 (differences listed in `src/dkg.rs`). The
+> a posteriori sharing module (`aposteriori`) implements §3.4 with an exact
+> coset Gaussian sampler (σ = √2); the paper estimates its security loss at
+> up to 12 bits.
 
 ---
 
@@ -64,12 +68,12 @@
 | Rounding bits | $d$ | $13$ | Power2Round parameter |
 | Hint budget | $\omega$ | $80$ | Max hint ones |
 
-### Threshold-Specific Parameters (Figure 8)
+### Threshold-Specific Parameters (full version; values as in the Go reference)
 
 | Parameter | Symbol | Description |
 |-----------|--------|-------------|
-| Max parties | $N_{\max}$ | $6$ (upper bound on $N$) |
-| K repetitions | $K$ | Parallel commitment slots (2–100, depends on (T,N)) |
+| Max parties | $N_{\max}$ | $8$ ((5,8), (6,8), (7,8) unsupported) |
+| K repetitions | $K$ | Parallel commitment slots (2–1195, depends on (T,N)) |
 | Hyperball radius | $r$ | ν-scaled L₂ norm bound for response rejection |
 | Commitment radius | $r_1$ | ν-scaled L₂ norm bound for randomness sampling |
 | Expansion factor | $\nu$ | 3 for ML-DSA-44 (scales first L·N coordinates) |
@@ -232,7 +236,7 @@ $$M=2,\ \mathcal{S}_2 = \left\{ \{0,1\},\ \{0,2\},\ \{1,2\} \right\} \qquad |\ma
 ### 5.2 Share Distribution (v0.3 — Paper-Faithful)
 
 In v0.3, secrets are generated **fresh and independently** per subset from a shared seed.
-This matches the paper's Figure 4 construction:
+This matches Fig. 5 of the paper (USENIX version) construction:
 
 $$\text{For each } S \in \mathcal{S}_M: \quad \mathbf{s}_1^{(S)} \xleftarrow{\text{SHAKE-256}} [-\eta, \eta]^{n \cdot \ell}$$
 
@@ -284,7 +288,7 @@ graph LR
 
 ---
 
-## 6. Threshold Key Generation (v0.3 — Figure 4)
+## 6. Threshold Key Generation (v0.3 — Fig. 5, USENIX version)
 
 ```mermaid
 flowchart TD
@@ -458,7 +462,7 @@ independent hyperball samples. The coordinator tries each of the K slots,
 accepting the first one that produces a valid FIPS 204 signature. This
 dramatically improves per-round success probability.
 
-### Numerical Values (ML-DSA-44, exact implementation values from Figure 8)
+### Numerical Values (ML-DSA-44, exact implementation values from the full version, as in the Go reference)
 
 | (T, N) | K | Radius r | Radius r1 |
 |--------|---|----------|-----------|
@@ -489,8 +493,8 @@ $$\mathbf{z} = \left(\sum_i \mathbf{y}_i\right) + c \cdot \mathbf{s}_1$$
 
 This is **exactly** the standard ML-DSA response with the aggregate masking $\mathbf{y} = \sum_i \mathbf{y}_i$.
 
-> [!WARNING]
-> After summation, $\mathbf{z}$ must remain in **centered form** (via `reduce()` only, no `caddq()`). The `pack_z` function computes $\gamma_1 - z_{\text{coeff}}$ which requires centered coefficients in $[-(\gamma_1-1), \gamma_1]$. Mapping to $[0, q)$ via `caddq()` produces garbage.
+> [!NOTE]
+> `pack_z` centers its input mod $q$ first and then encodes $\gamma_1 - z$, so any representative of $\mathbf{z}$ works as long as the centered coefficients lie in $(-\gamma_1, \gamma_1]$.
 
 **Step 3 — L∞ check on aggregate (constant-time):**
 
@@ -567,7 +571,7 @@ The implementation defends against the following adversarial capabilities:
 |----|--------|---------|----------|
 | ADV-1 | Commitment equivocation between rounds | Commitment binding | Round-1 hash over `(tr,id,act,session,mu,w_packed)` must match Round-2 reveal |
 | ADV-2 | Replay of stale commitments across sessions/messages | Session binding | Commitment hash includes `session_id` and `mu = CRH(tr || msg)` |
-| ADV-3 | RNG rollback / nonce reuse | Hedged nonces | Round-1 nonce seed binds RNG entropy + key material + transcript context |
+| ADV-3 | RNG failure / nonce reuse | `NonceGuard` | `round1` refuses a repeated session ID per key and mixes a strictly increasing per-key counter into the nonce seed, so a repeated RNG output does not repeat y. Not covered: rolling back the RNG and the guard's state together. |
 | ADV-4 | Invalid aggregate emitted as success | Fail-closed verification | `combine()` and SDK path verify candidate signatures before returning |
 | ADV-5 | Hint/packing divergence from verifier path | Algebraic alignment | `f = Az - ct1*2^d - w`, centered low bits for `MakeHint`, centered `z` packing |
 
@@ -577,7 +581,7 @@ All constant-time comparisons use `subtle::ConstantTimeEq`. All norm checks (`ch
 
 ## 12. Sequence Diagrams
 
-### 12.1 Key Generation and Share Distribution (Figure 4)
+### 12.1 Key Generation and Share Distribution (Fig. 5, USENIX version)
 
 ```mermaid
 sequenceDiagram
@@ -752,24 +756,24 @@ $$\mathbf{z} = \sum_{i \in \mathcal{A}} \mathbf{z}_i = \sum_{i \in \mathcal{A}} 
 The threshold scheme inherits the _Module-LWE/Module-SIS_ hardness assumptions from ML-DSA. An adversary controlling fewer than $T$ parties cannot reconstruct $\mathbf{s}_1$ because:
 
 - They are missing at least one RSS share piece (for a subset they don't fully cover)
-- Each missing piece is uniformly random in $[-\eta, \eta]^{n \cdot \ell}$, information-theoretically hiding the secret
+- Each missing piece is uniformly random in $[-\eta, \eta]^{n \cdot \ell}$; given the public key it hides the secret computationally (MLWE), not information-theoretically
 
 ### Privacy
 
-- Share pieces are $\eta$-bounded random values — statistically independent of the secret
-- Subset shares are generated independently from SHAKE-derived seeds (no remainder-share decomposition)
-- Sensitive material ($\mathbf{s}_{1,i}$, $\mathbf{y}_i$, seed) is zeroized on drop via `zeroize`
+- Fresh keys (`rss`, `dkg`): subset shares are independent $\eta$-bounded values from SHAKE-derived seeds
+- A posteriori shares are Gaussian ($\sigma = \sqrt 2$) conditioned on their sum; a coalition below T learns a hint on the secret (paper §3.4: up to 12 bits of security, per sharing — share a key at most once)
+- Sensitive material ($\mathbf{s}_{1,i}$, $\mathbf{y}_i$, seeds) is zeroized on a best-effort basis via `zeroize`; copies made by `sha3` internal state and by moves of stack values are not wiped
 - Challenge and session binding comparisons use constant-time equality (`subtle::ConstantTimeEq`)
 - All norm checks (`chknorm`) iterate all coefficients/polynomials without early exit
-- Hyperball sampling/rejection uses floating-point (`f64`/`libm`) and should be treated as non-constant-time in strict side-channel models
+- Hyperball sampling uses branch-free sine/cosine and rounding; hardware `f64` arithmetic, `sqrt` and `libm::log` (branch-free on reachable inputs) remain
 
 ### Adversarial Resilience
 
 - **Malicious coordinator** cannot alter revealed commitments after Round 1 (ADV-1)
 - **Replay across sessions/messages** is detected by transcript-bound commitment hashes (ADV-2)
-- **RNG failure** is hedged via transcript-bound nonce derivation (ADV-3)
+- **RNG failure** is mitigated by `NonceGuard` unless the RNG and the guard state are rolled back together (ADV-3)
 - **Invalid aggregates** are blocked by fail-closed end-to-end verification (ADV-4)
-- **Timing side-channels**: The final hyperball rejection comparison (`FVec::excess`) uses branchless IEEE 754 bit-level ordering, and the Box-Muller clamp uses `libm::fmax` to avoid data-dependent branches. However, the underlying `f64`/`libm` arithmetic (log, sqrt, sin, cos, accumulation) is **not constant-time** on typical hardware. Deployments with strict local side-channel requirements should isolate party execution in separate processes or enclaves.
+- **Timing side-channels**: The final hyperball rejection comparison (`FVec::excess`) uses branchless IEEE 754 bit-level ordering, and the Box-Muller clamp uses `libm::fmax` to avoid data-dependent branches. Sine, cosine and rounding are computed without input-dependent branches (`libm`'s versions branch on the secret angle and magnitude). Hardware `f64` arithmetic and `sqrt` remain; their latency is input-independent for normal operands on mainstream cores, but this is not guaranteed on every platform. Deployments with strict local side-channel requirements should isolate party execution in separate processes or enclaves.
 
 ### Liveness
 
@@ -795,7 +799,7 @@ The crate exposes a high-level SDK module: `threshold_ml_dsa::sdk`.
 ### Mapping to Core Protocol
 
 - `ThresholdMlDsa44Sdk::from_seed(...)`
-  - Calls `rss::keygen_from_seed()` (Figure 4 fresh keygen)
+  - Calls `rss::keygen_from_seed()` (Fig. 5 fresh keygen)
   - Produces `ThresholdPrivateKey` for each party
 - `ThresholdMlDsa44Sdk::threshold_sign(active, msg, rng)`
   - Round 1: `sign::round1()` — K hyperball commitments per party
@@ -817,6 +821,6 @@ be transported with authenticated encryption and replay protection.
 > **References:**
 >
 > - NIST FIPS 204 — _Module-Lattice-Based Digital Signature Standard_ (2024)
-> - ePrint 2026/013 — _Efficient Threshold ML-DSA via Replicated Secret Sharing_
+> - ePrint 2026/013 — _Efficient Threshold ML-DSA_ (Celi, del Pino, Espitau, Niot, Prest; USENIX Security 2026)
 > - [Threshold-ML-DSA (Go)](https://github.com/Threshold-ML-DSA/Threshold-ML-DSA) — Reference Go implementation
 > - [`dilithium-rs`](https://crates.io/crates/dilithium-rs) — Pure-Rust FIPS 204 implementation

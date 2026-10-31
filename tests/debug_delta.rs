@@ -29,7 +29,7 @@ fn trace_one_attempt() {
     for &party_id in &active {
         let sk = sdk.party_key(party_id as usize).unwrap();
         let (hash, st1) =
-            threshold_ml_dsa::sign::round1(sk, sdk.params(), act, msg, &session_id, &mut rng)
+            threshold_ml_dsa::sign::round1(sk, sdk.params(), act, msg, &session_id, &mut rng, &mut threshold_ml_dsa::nonce::InMemoryNonceGuard::new())
                 .unwrap();
         rd1_hashes.push(hash);
         rd1_states.push(st1);
@@ -38,7 +38,7 @@ fn trace_one_attempt() {
     // Round 2
     let mut rd2_reveals = Vec::new();
     let mut rd2_states = Vec::new();
-    for (idx, &party_id) in active.iter().enumerate() {
+    for (idx, (&party_id, st1)) in active.iter().zip(rd1_states).enumerate() {
         let sk = sdk.party_key(party_id as usize).unwrap();
         let (reveal, st2) = threshold_ml_dsa::sign::round2(
             sk,
@@ -47,7 +47,7 @@ fn trace_one_attempt() {
             &session_id,
             &rd1_hashes,
             &rd1_hashes[idx],
-            &rd1_states[idx],
+            st1,
             sdk.params(),
         )
         .unwrap();
@@ -75,10 +75,7 @@ fn trace_one_attempt() {
     // Round 3 — each party verifies reveals independently and gets its own
     // consumable witness (round3 takes VerifiedReveals by value).
     let mut all_responses = Vec::new();
-    for (st1, (&party_id, st2)) in rd1_states
-        .into_iter()
-        .zip(active.iter().zip(rd2_states.iter()))
-    {
+    for (&party_id, st2) in active.iter().zip(rd2_states) {
         let sk = sdk.party_key(party_id as usize).unwrap();
         let verified = threshold_ml_dsa::sign::verify_all_round2_reveals(
             sk.tr(),
@@ -94,7 +91,6 @@ fn trace_one_attempt() {
         let zs = threshold_ml_dsa::sign::round3(
             sk,
             &wfinals,
-            st1,
             st2,
             sdk.params(),
             verified,

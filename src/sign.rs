@@ -21,6 +21,7 @@ use alloc::vec::Vec;
 
 use crate::error::Error;
 use crate::fvec::{sample_hyperball, FVec};
+use crate::nonce::NonceGuard;
 use crate::params::{CTILDEBYTES, MAX_PARTIES, TRBYTES, ThresholdParams, K, L, N, Q};
 use crate::partition;
 use crate::poly::{Poly, PolyVecK, PolyVecL};
@@ -43,6 +44,9 @@ pub struct StRound1 {
     /// Round 1 commitments use rounded copies of these vectors.
     /// Round 3 adds them in floating-point before the final rounding step.
     pub(crate) rand_fvecs: Vec<FVec>,
+    /// [`ThresholdPrivateKey::guard_key_id`] of the key that drew the nonce;
+    /// `round3` refuses to answer it with another key.
+    pub(crate) key_id: [u8; 32],
 }
 
 impl Drop for StRound1 {
@@ -57,7 +61,9 @@ impl Drop for StRound1 {
 
 /// Round 2 state saved by a party for use in Round 3.
 ///
-/// Contains commitment hashes and message hash; zeroized on drop.
+/// Owns the Round 1 state: `round2` consumes `StRound1` by value, so a party
+/// can reveal its commitment for a given nonce at most once, and `round3`
+/// consumes this state by value, so a nonce answers at most one challenge.
 /// Fields are `pub(crate)` to prevent external state duplication.
 #[derive(Zeroize)]
 #[zeroize(drop)]
@@ -68,6 +74,11 @@ pub struct StRound2 {
     pub(crate) mu: [u8; 64],
     /// Active signer bitmask
     pub(crate) act: u8,
+    /// Session ID the Round 1 commitment was bound to
+    pub(crate) session_id: [u8; 32],
+    /// Round 1 nonce state (zeroized by its own Drop impl)
+    #[zeroize(skip)]
+    pub(crate) st1: StRound1,
 }
 
 /// Proof-of-verification witness for Round-2 reveals.
@@ -175,35 +186,59 @@ pub fn compute_mu(tr: &[u8; TRBYTES], msg: &[u8]) -> [u8; 64] {
 
 /// Round 1: generate K hyperball commitments.
 ///
+/// # Security
+///
+/// `guard` reserves `session_id` before any randomness is drawn and refuses
+/// a session ID already used with this key; its counter is mixed into the
+/// nonce seed, so a repeated RNG output alone cannot reproduce a nonce.
+/// Reusing a nonce under two challenges would reveal this party's partial
+/// secret. See [`crate::nonce`] for what a guard cannot protect against.
+///
 /// Returns:
 /// - `commitment_hash`: 32-byte hash H(tag ‖ tr ‖ id ‖ act ‖ session ‖ μ ‖ `w_packed`)
 /// - `StRound1`: saved state for Round 3
 ///
 /// This matches the Go `Round1()` function.
-pub fn round1<R: RngCore + CryptoRng>(
+pub fn round1<R: RngCore + CryptoRng, G: NonceGuard + ?Sized>(
     sk: &ThresholdPrivateKey,
     params: &ThresholdParams,
     act: u8,
     msg: &[u8],
     session_id: &[u8; 32],
     rng: &mut R,
+    guard: &mut G,
 ) -> Result<([u8; 32], StRound1), Error> {
+    params.validate()?;
+    if (sk.t, sk.n) != (params.t, params.n) {
+        return Err(Error::InvalidParameters);
+    }
+    if sk.id >= params.n
+        || u16::from(act) >> params.n != 0
+        || act & (1 << sk.id) == 0
+        || act.count_ones() != u32::from(params.t)
+    {
+        return Err(Error::InvalidParameters);
+    }
+    // Reserve the session before drawing randomness: a replayed session ID
+    // is refused, and the counter makes every nonce seed input distinct.
+    let key_id = sk.guard_key_id();
+    let counter = guard.reserve(&key_id, session_id)?;
     let mu = compute_mu(&sk.tr, msg);
 
-    // Hedged nonce derivation:
-    // bind RNG entropy to long-term per-party key and transcript context so
-    // RNG rollback does not trivially re-use nonces across distinct sessions.
+    // Hedged nonce derivation: bind RNG entropy to the long-term per-party
+    // key, transcript context and the guard counter.
     let mut rng_entropy = [0u8; 64];
     rng.fill_bytes(&mut rng_entropy);
     let mut rhop = [0u8; 64];
     let mut rhop_h = Shake256::default();
-    rhop_h.update(b"th-ml-dsa-round1-rhop-v1");
+    rhop_h.update(b"th-ml-dsa-round1-rhop-v2");
     rhop_h.update(&rng_entropy);
     rhop_h.update(&sk.key);
     rhop_h.update(&sk.tr);
     rhop_h.update(&[sk.id, act]);
     rhop_h.update(session_id);
     rhop_h.update(&mu);
+    rhop_h.update(&counter.to_le_bytes());
     rhop_h.finalize_xof().read(&mut rhop);
     rng_entropy.zeroize();
 
@@ -215,9 +250,12 @@ pub fn round1<R: RngCore + CryptoRng>(
     let a = expand_a(&sk.rho);
 
     for i in 0..k_reps {
-        let mut fv = FVec::zero();
+        // Sample in place: moving a filled FVec would leave an unwiped copy
+        // of the nonce on the stack. (Capacity is reserved, so no realloc.)
+        rand_fvecs.push(FVec::zero());
+        let fv = &mut rand_fvecs[i];
         // Sample from hyperball with radius r₁ (randomness ball)
-        sample_hyperball(&mut fv, params.r1, params.nu, &rhop, i as u16);
+        sample_hyperball(fv, params.r1, params.nu, &rhop, i as u16);
 
         // Round FVec to integer polynomials (y, e_) ∈ ℤ^L × ℤ^K
         // CRITICAL: These rounded integers are what we use for BOTH
@@ -232,18 +270,23 @@ pub fn round1<R: RngCore + CryptoRng>(
         let mut w = PolyVecK::zero();
         for (j, a_row) in a.iter().enumerate().take(K) {
             // w[j] = Σ_l A[j][l] · yh[l] (pointwise in NTT domain)
+            // acc = (A·y)[j]; with the public w it would give e, so wipe it.
             let mut acc = Poly::zero();
+            let mut prod = Poly::zero();
             for (l, a_jl) in a_row.iter().enumerate().take(L) {
-                let mut prod = Poly::zero();
                 Poly::pointwise_montgomery(&mut prod, a_jl, &yh.polys[l]);
-                let acc_copy = acc.clone();
-                Poly::add(&mut acc, &acc_copy, &prod);
+                for (a, p) in acc.coeffs.iter_mut().zip(&prod.coeffs) {
+                    *a += p;
+                }
             }
             acc.reduce();
             acc.invntt_tomont();
             // w[j] = A·y[j] + e_[j]
-            let acc_copy = acc.clone();
-            Poly::add(&mut w.polys[j], &acc_copy, &e_.polys[j]);
+            for ((wc, a), e) in w.polys[j].coeffs.iter_mut().zip(&acc.coeffs).zip(&e_.polys[j].coeffs) {
+                *wc = a + e;
+            }
+            acc.zeroize();
+            prod.zeroize();
         }
         w.reduce();
 
@@ -251,8 +294,12 @@ pub fn round1<R: RngCore + CryptoRng>(
         let packed = pack_w_single(&w);
         w_packed_all.push(packed);
 
-        rand_fvecs.push(fv);
+        // y is the integer nonce: with an accepted z it gives c·s_I = z − y.
+        y.zeroize();
+        e_.zeroize();
+        yh.zeroize();
     }
+    rhop.zeroize();
 
     let hash = round1_commitment_hash(
         &sk.tr,
@@ -268,13 +315,19 @@ pub fn round1<R: RngCore + CryptoRng>(
         StRound1 {
             w_packed: w_packed_all,
             rand_fvecs,
+            key_id,
         },
     ))
 }
 
 /// Round 2: reveal commitments and compute μ.
 ///
-/// Verifies that this party's own reveal is bound to its Round 1 commitment.
+/// Consumes `st_rd1`: a party reveals its Round 1 commitment exactly once, so
+/// it cannot be made to answer a transcript whose peer commitments were chosen
+/// after its own reveal was seen.
+///
+/// Verifies that this party's own reveal is bound to its Round 1 commitment
+/// and that this commitment appears in its own slot of `msgs_rd1`.
 /// NOTE: Per-peer reveal verification is done separately via
 /// `verify_round2_reveal` -- callers in distributed settings MUST
 /// call it for every received reveal.
@@ -287,9 +340,28 @@ pub fn round2(
     session_id: &[u8; 32],
     msgs_rd1: &[[u8; 32]], // commitment hashes from Round 1
     own_rd1_hash: &[u8; 32],
-    st_rd1: &StRound1,
-    _params: &ThresholdParams,
+    st_rd1: StRound1,
+    params: &ThresholdParams,
 ) -> Result<(Vec<u8>, StRound2), Error> {
+    params.validate()?;
+    if (sk.t, sk.n) != (params.t, params.n) {
+        return Err(Error::InvalidParameters);
+    }
+    // The transcript must hold exactly one commitment per active party, and
+    // our own slot must hold our own commitment; otherwise the aggregate
+    // could exclude our w and leave the challenge under someone else's control.
+    let active = bitmask_to_sorted_ids(act, params.n);
+    if u16::from(act) >> params.n != 0 || msgs_rd1.len() != active.len() {
+        return Err(Error::InvalidParameters);
+    }
+    let own_idx = active
+        .iter()
+        .position(|&id| id == sk.id)
+        .ok_or(Error::InvalidParameters)?;
+    if !bool::from(msgs_rd1[own_idx].ct_eq(own_rd1_hash)) {
+        return Err(Error::InvalidShare);
+    }
+
     // Concatenate all packed w data for this party's reveal
     let mut reveal_data = Vec::new();
     for packed in &st_rd1.w_packed {
@@ -314,6 +386,8 @@ pub fn round2(
         hashes: msgs_rd1.to_vec(),
         mu,
         act,
+        session_id: *session_id,
+        st1: st_rd1,
     };
 
     Ok((reveal_data, st2))
@@ -370,8 +444,7 @@ pub fn verify_round2_reveal(
 pub fn round3(
     sk: &ThresholdPrivateKey,
     wfinals: &[PolyVecK], // K aggregated commitment vectors
-    st_rd1: StRound1,     // consumed: nonce randomness is single-use
-    st_rd2: &StRound2,    // μ and active set from Round 2
+    st_rd2: StRound2,     // consumed: owns the single-use Round 1 nonce state
     params: &ThresholdParams,
     verified: VerifiedReveals,  // consumed: proof that all reveals were checked
 ) -> Result<Vec<PolyVecL>, Error> {
@@ -381,6 +454,14 @@ pub fn round3(
         ML_DSA_44,
     };
 
+    params.validate()?;
+    if (sk.t, sk.n) != (params.t, params.n) || u16::from(st_rd2.act) >> params.n != 0 {
+        return Err(Error::InvalidParameters);
+    }
+    // The nonce must be answered by the key that drew it.
+    if !bool::from(st_rd2.st1.key_id.ct_eq(&sk.guard_key_id())) {
+        return Err(Error::InvalidParameters);
+    }
     let k_reps = params.k_reps as usize;
     let mode = ML_DSA_44;
 
@@ -390,6 +471,20 @@ pub fn round3(
     }
     if verified.k_reps as usize != k_reps {
         return Err(Error::InvalidParameters);
+    }
+    if !bool::from(verified.session_id.ct_eq(&st_rd2.session_id)) {
+        return Err(Error::InvalidShare);
+    }
+
+    // pack_w_single is only injective on [0, Q): reject non-canonical
+    // coefficients so an aliased aggregate cannot pass the hash check below
+    // while decomposing to a different w₁ (and thus a different challenge).
+    for w in &wfinals[..k_reps] {
+        for p in &w.polys {
+            if p.coeffs.iter().any(|&c| !(0..Q).contains(&c)) {
+                return Err(Error::InvalidParameters);
+            }
+        }
     }
 
     // Ensure the coordinator-supplied aggregates match the reveals that were
@@ -431,7 +526,7 @@ pub fn round3(
     // NOTE: recover_partial_secret returns values ALREADY in NTT domain
     // because Share stores s1h = NTT(s1), so summing them gives NTT(Σ s1)
     // directly. Do NOT NTT again — that would double-transform.
-    let (s1h, s2h) = recover_partial_secret(sk, &partition[party_idx]);
+    let (mut s1h, mut s2h) = recover_partial_secret(sk, &partition[party_idx])?;
     let mut s1h_d = DPolyVecL::default();
     let mut s2h_d = DPolyVecK::default();
     for j in 0..L {
@@ -490,7 +585,13 @@ pub fn round3(
         // Build the full floating response vector and add the sampled
         // hyperball randomness from Round 1 before rejection/rounding.
         let mut zf = FVec::from_polyvecs(&z1, &z2);
-        zf.add_assign(&st_rd1.rand_fvecs[i]);
+        // c·s_I is secret; zf (zeroized on drop) now holds the only copy.
+        z1.zeroize();
+        z2.zeroize();
+        for p in z1_d.vec.iter_mut().chain(z2_d.vec.iter_mut()) {
+            p.coeffs.zeroize();
+        }
+        zf.add_assign(&st_rd2.st1.rand_fvecs[i]);
         if zf.excess(params.r, params.nu) {
             // Rejection: emit zero response
             zs.push(PolyVecL::zero());
@@ -505,6 +606,13 @@ pub fn round3(
         let mut z2_out = PolyVecK::zero();
         zf.round_to_polyvecs(&mut z_out, &mut z2_out);
         zs.push(z_out);
+        z2_out.zeroize();
+    }
+
+    s1h.zeroize();
+    s2h.zeroize();
+    for p in s1h_d.vec.iter_mut().chain(s2h_d.vec.iter_mut()) {
+        p.coeffs.zeroize();
     }
 
     Ok(zs)
@@ -733,19 +841,25 @@ where
 }
 
 /// Recover this party's partial secret from the assigned share bitmasks.
-fn recover_partial_secret(sk: &ThresholdPrivateKey, assigned_masks: &[u8]) -> (PolyVecL, PolyVecK) {
+///
+/// Fails if the partition assigns a share this party does not hold.
+fn recover_partial_secret(
+    sk: &ThresholdPrivateKey,
+    assigned_masks: &[u8],
+) -> Result<(PolyVecL, PolyVecK), Error> {
+    // Check first so an error never leaves a partial sum behind.
+    if assigned_masks.iter().any(|m| !sk.shares.contains_key(m)) {
+        return Err(Error::InvalidShare);
+    }
     let mut s1h = PolyVecL::zero();
     let mut s2h = PolyVecK::zero();
-
-    for &mask in assigned_masks {
-        if let Some(share) = sk.shares.get(&mask) {
-            s1h.add_assign(&share.s1h);
-            s2h.add_assign(&share.s2h);
-        }
+    for share in assigned_masks.iter().filter_map(|m| sk.shares.get(m)) {
+        s1h.add_assign(&share.s1h);
+        s2h.add_assign(&share.s2h);
     }
     s1h.reduce();
     s2h.reduce();
-    (s1h, s2h)
+    Ok((s1h, s2h))
 }
 
 /// Extract only w1 (`HighBits`) from a `PolyVecK`, skipping the unused w0 copy.
@@ -881,5 +995,359 @@ mod tests {
         let mu1 = compute_mu(&tr, b"message A");
         let mu2 = compute_mu(&tr, b"message B");
         assert_ne!(mu1, mu2, "different messages must produce different mu");
+    }
+}
+
+#[cfg(test)]
+mod coverage_tests {
+    use super::*;
+    use crate::coordinator;
+    use crate::nonce::InMemoryNonceGuard;
+    use crate::params::get_threshold_params;
+    use crate::rss::keygen_from_seed;
+    use rand::rngs::StdRng;
+    use rand::SeedableRng;
+
+    const MSG: &[u8] = b"coverage";
+    const SID: [u8; 32] = [7u8; 32];
+    const ACT: u8 = 0b11;
+
+    /// A (2, 2) session driven to the inputs of party 0's Round 3.
+    struct Fixture {
+        sks: Vec<ThresholdPrivateKey>,
+        params: ThresholdParams,
+        hashes: Vec<[u8; 32]>,
+        reveals: Vec<Vec<u8>>,
+        st2: StRound2,
+        wfinals: Vec<PolyVecK>,
+        verified: VerifiedReveals,
+    }
+
+    fn fixture() -> Fixture {
+        let params = get_threshold_params(2, 2).unwrap();
+        let (_, sks) = keygen_from_seed(&[1u8; 32], &params).unwrap();
+        let mut rng = StdRng::seed_from_u64(1);
+        let mut guard = InMemoryNonceGuard::new();
+        let mut hashes = Vec::new();
+        let mut st1s = Vec::new();
+        for sk in &sks {
+            let (h, st1) = round1(sk, &params, ACT, MSG, &SID, &mut rng, &mut guard).unwrap();
+            hashes.push(h);
+            st1s.push(st1);
+        }
+        let mut reveals = Vec::new();
+        let mut st2s = Vec::new();
+        for (i, st1) in st1s.into_iter().enumerate() {
+            let (r, st2) = round2(&sks[i], ACT, MSG, &SID, &hashes, &hashes[i], st1, &params).unwrap();
+            reveals.push(r);
+            st2s.push(st2);
+        }
+        let k = params.k_reps as usize;
+        let size = pack_w_single_size();
+        let parsed: Vec<Vec<PolyVecK>> = reveals
+            .iter()
+            .map(|r| (0..k).map(|j| unpack_w_single(&r[j * size..(j + 1) * size])).collect())
+            .collect();
+        let wfinals = coordinator::aggregate_commitments(&parsed, k).unwrap();
+        let verified =
+            verify_all_round2_reveals(&sks[0].tr, &[0, 1], ACT, MSG, &SID, &reveals, &hashes, k).unwrap();
+        Fixture { sks, params, hashes, reveals, st2: st2s.into_iter().next().unwrap(), wfinals, verified }
+    }
+
+    #[test]
+    fn happy_path_round3() {
+        let f = fixture();
+        let zs = round3(&f.sks[0], &f.wfinals, f.st2, &f.params, f.verified).unwrap();
+        assert_eq!(zs.len(), f.params.k_reps as usize);
+    }
+
+    #[test]
+    fn verify_all_rejects_bad_inputs() {
+        let f = fixture();
+        let k = f.params.k_reps as usize;
+        let tr = &f.sks[0].tr;
+        // length mismatch
+        assert_eq!(
+            verify_all_round2_reveals(tr, &[0], ACT, MSG, &SID, &f.reveals, &f.hashes, k).err(),
+            Some(Error::InvalidParameters)
+        );
+        // k_reps out of range
+        assert_eq!(
+            verify_all_round2_reveals(tr, &[0, 1], ACT, MSG, &SID, &f.reveals, &f.hashes, 0).err(),
+            Some(Error::InvalidParameters)
+        );
+        assert_eq!(
+            verify_all_round2_reveals(tr, &[0, 1], ACT, MSG, &SID, &f.reveals, &f.hashes, 1 << 16).err(),
+            Some(Error::InvalidParameters)
+        );
+        // tampered reveal
+        let mut bad = f.reveals.clone();
+        bad[1][0] ^= 1;
+        assert_eq!(
+            verify_all_round2_reveals(tr, &[0, 1], ACT, MSG, &SID, &bad, &f.hashes, k).err(),
+            Some(Error::InvalidShare)
+        );
+        // party ids vs act
+        assert!(validate_party_ids_match_act(&[], ACT).is_err());
+        assert!(validate_party_ids_match_act(&[0, 2], ACT).is_err());
+        // reveal of the wrong length
+        assert_eq!(compute_wfinals_hash_from_reveals(&[vec![0u8; 3]], k).err(), Some(Error::InvalidParameters));
+    }
+
+    #[test]
+    fn round1_and_round2_reject_bad_inputs() {
+        let params = get_threshold_params(2, 2).unwrap();
+        let (_, sks) = keygen_from_seed(&[2u8; 32], &params).unwrap();
+        let mut rng = StdRng::seed_from_u64(2);
+        let mut guard = InMemoryNonceGuard::new();
+        // act does not contain the party
+        assert_eq!(
+            round1(&sks[0], &params, 0b10, MSG, &SID, &mut rng, &mut guard).err(),
+            Some(Error::InvalidParameters)
+        );
+        // key for other (T, N)
+        let other = get_threshold_params(2, 3).unwrap();
+        assert_eq!(
+            round1(&sks[0], &other, 0b11, MSG, &SID, &mut rng, &mut guard).err(),
+            Some(Error::InvalidParameters)
+        );
+
+        // round2: own slot and own hash agree, but neither matches our w
+        let (h, st1) = round1(&sks[0], &params, ACT, MSG, &SID, &mut rng, &mut guard).unwrap();
+        let fake = [9u8; 32];
+        assert_eq!(
+            round2(&sks[0], ACT, MSG, &SID, &[fake, h], &fake, st1, &params).err(),
+            Some(Error::InvalidShare)
+        );
+    }
+
+    #[test]
+    fn round3_rejects_wrong_key_params() {
+        let f = fixture();
+        let (_, other) = keygen_from_seed(&[3u8; 32], &get_threshold_params(2, 3).unwrap()).unwrap();
+        assert_eq!(
+            round3(&other[0], &f.wfinals, f.st2, &f.params, f.verified).err(),
+            Some(Error::InvalidParameters)
+        );
+    }
+
+    #[test]
+    fn round3_rejects_short_wfinals() {
+        let f = fixture();
+        assert_eq!(
+            round3(&f.sks[0], &f.wfinals[..1], f.st2, &f.params, f.verified).err(),
+            Some(Error::InvalidParameters)
+        );
+    }
+
+    #[test]
+    fn round3_rejects_witness_with_wrong_k() {
+        let mut f = fixture();
+        f.verified.k_reps += 1;
+        assert_eq!(
+            round3(&f.sks[0], &f.wfinals, f.st2, &f.params, f.verified).err(),
+            Some(Error::InvalidParameters)
+        );
+    }
+
+    #[test]
+    fn round3_rejects_witness_from_other_session() {
+        let mut f = fixture();
+        f.verified.session_id[0] ^= 1;
+        assert_eq!(
+            round3(&f.sks[0], &f.wfinals, f.st2, &f.params, f.verified).err(),
+            Some(Error::InvalidShare)
+        );
+    }
+
+    #[test]
+    fn round3_rejects_substituted_aggregate() {
+        let mut f = fixture();
+        f.wfinals[0].polys[0].coeffs[0] = (f.wfinals[0].polys[0].coeffs[0] + 1) % Q;
+        assert_eq!(
+            round3(&f.sks[0], &f.wfinals, f.st2, &f.params, f.verified).err(),
+            Some(Error::InvalidShare)
+        );
+    }
+
+    #[test]
+    fn round3_rejects_forged_binding() {
+        let mut f = fixture();
+        f.verified.binding[0] ^= 1;
+        assert_eq!(
+            round3(&f.sks[0], &f.wfinals, f.st2, &f.params, f.verified).err(),
+            Some(Error::InvalidShare)
+        );
+    }
+
+    #[test]
+    fn combine_rejects_responses_for_another_message() {
+        // Real commitments and responses, but combined for a different
+        // message: every slot packs and then fails FIPS 204 verification.
+        let params = get_threshold_params(2, 2).unwrap();
+        let (pk, sks) = keygen_from_seed(&[5u8; 32], &params).unwrap();
+        let mut rng = StdRng::seed_from_u64(5);
+        let mut guard = InMemoryNonceGuard::new();
+        let k = params.k_reps as usize;
+        let size = pack_w_single_size();
+        let mut hashes = Vec::new();
+        let mut st1s = Vec::new();
+        for sk in &sks {
+            let (h, st1) = round1(sk, &params, ACT, MSG, &SID, &mut rng, &mut guard).unwrap();
+            hashes.push(h);
+            st1s.push(st1);
+        }
+        let mut reveals = Vec::new();
+        let mut st2s = Vec::new();
+        for (i, st1) in st1s.into_iter().enumerate() {
+            let (r, st2) = round2(&sks[i], ACT, MSG, &SID, &hashes, &hashes[i], st1, &params).unwrap();
+            reveals.push(r);
+            st2s.push(st2);
+        }
+        let parsed: Vec<Vec<PolyVecK>> = reveals
+            .iter()
+            .map(|r| (0..k).map(|j| unpack_w_single(&r[j * size..(j + 1) * size])).collect())
+            .collect();
+        let wfinals = coordinator::aggregate_commitments(&parsed, k).unwrap();
+        let mut responses = Vec::new();
+        for (i, st2) in st2s.into_iter().enumerate() {
+            let v = verify_all_round2_reveals(&sks[i].tr, &[0, 1], ACT, MSG, &SID, &reveals, &hashes, k).unwrap();
+            responses.push(round3(&sks[i], &wfinals, st2, &params, v).unwrap());
+        }
+        let zfinals = coordinator::aggregate_responses(&responses, k).unwrap();
+        assert_eq!(
+            coordinator::combine(&pk, b"another message", &wfinals, &zfinals, &params).err(),
+            Some(Error::InsufficientResponses)
+        );
+    }
+
+    #[test]
+    fn pack_w_single_maps_negative_coefficients() {
+        let mut w = PolyVecK::zero();
+        w.polys[0].coeffs[0] = -1;
+        let back = unpack_w_single(&pack_w_single(&w));
+        assert_eq!(back.polys[0].coeffs[0], Q - 1);
+    }
+}
+
+#[cfg(test)]
+mod transcript_tests {
+    use super::*;
+    use crate::nonce::InMemoryNonceGuard;
+    use crate::params::get_threshold_params;
+    use crate::rss::keygen_from_seed;
+    use rand::rngs::StdRng;
+    use rand::SeedableRng;
+
+    #[test]
+    fn round2_needs_one_hash_per_signer_and_round3_canonical_aggregates() {
+        let params = get_threshold_params(2, 2).unwrap();
+        let (_, sks) = keygen_from_seed(&[19u8; 32], &params).unwrap();
+        let mut rng = StdRng::seed_from_u64(19);
+        let mut guard = InMemoryNonceGuard::new();
+        let sid = [1u8; 32];
+        let (h, st1) = round1(&sks[0], &params, 0b11, b"m", &sid, &mut rng, &mut guard).unwrap();
+        assert_eq!(
+            round2(&sks[0], 0b11, b"m", &sid, &[h], &h, st1, &params).err(),
+            Some(Error::InvalidParameters)
+        );
+
+        let mut hashes = Vec::new();
+        let mut st1s = Vec::new();
+        let sid = [2u8; 32];
+        for sk in &sks {
+            let (h, st1) = round1(sk, &params, 0b11, b"m", &sid, &mut rng, &mut guard).unwrap();
+            hashes.push(h);
+            st1s.push(st1);
+        }
+        let mut reveals = Vec::new();
+        let mut st2s = Vec::new();
+        for (i, st1) in st1s.into_iter().enumerate() {
+            let (r, st2) = round2(&sks[i], 0b11, b"m", &sid, &hashes, &hashes[i], st1, &params).unwrap();
+            reveals.push(r);
+            st2s.push(st2);
+        }
+        let k = params.k_reps as usize;
+        let verified = verify_all_round2_reveals(&sks[0].tr, &[0, 1], 0b11, b"m", &sid, &reveals, &hashes, k).unwrap();
+        let mut wfinals = alloc::vec![PolyVecK::zero(); k];
+        wfinals[0].polys[0].coeffs[0] = -1;
+        let st2 = st2s.into_iter().next().unwrap();
+        assert_eq!(round3(&sks[0], &wfinals, st2, &params, verified).err(), Some(Error::InvalidParameters));
+    }
+}
+
+#[cfg(test)]
+mod binding_tests {
+    use super::*;
+    use crate::coordinator;
+    use crate::nonce::InMemoryNonceGuard;
+    use crate::params::get_threshold_params;
+    use crate::rss::keygen_from_seed;
+    use rand::rngs::StdRng;
+    use rand::SeedableRng;
+
+    #[test]
+    fn round1_requires_exactly_t_signers_and_round2_matching_key() {
+        let params = get_threshold_params(2, 3).unwrap();
+        let (_, sks) = keygen_from_seed(&[40u8; 32], &params).unwrap();
+        let mut rng = StdRng::seed_from_u64(40);
+        let mut guard = InMemoryNonceGuard::new();
+        assert_eq!(
+            round1(&sks[0], &params, 0b111, b"m", &[1; 32], &mut rng, &mut guard).err(),
+            Some(Error::InvalidParameters)
+        );
+        // No guard counter is spent on a rejected call.
+        assert_eq!(guard.counter(&sks[0].guard_key_id()), 0);
+
+        let (h, st1) = round1(&sks[0], &params, 0b011, b"m", &[2; 32], &mut rng, &mut guard).unwrap();
+        let other = get_threshold_params(2, 2).unwrap();
+        assert_eq!(
+            round2(&sks[0], 0b011, b"m", &[2; 32], &[h, h], &h, st1, &other).err(),
+            Some(Error::InvalidParameters)
+        );
+    }
+
+    #[test]
+    fn partial_secret_requires_every_assigned_share() {
+        let params = get_threshold_params(2, 3).unwrap();
+        let (_, sks) = keygen_from_seed(&[43u8; 32], &params).unwrap();
+        // Party 0 does not hold subset {1, 2}.
+        assert_eq!(recover_partial_secret(&sks[0], &[0b011, 0b110]).err(), Some(Error::InvalidShare));
+        assert!(recover_partial_secret(&sks[0], &[0b011, 0b101]).is_ok());
+    }
+
+    #[test]
+    fn round3_refuses_a_nonce_drawn_by_another_key() {
+        // Two independent (2, 2) key sets with party 0 swapped in round 3.
+        let params = get_threshold_params(2, 2).unwrap();
+        let (_, sks) = keygen_from_seed(&[41u8; 32], &params).unwrap();
+        let (_, alien) = keygen_from_seed(&[42u8; 32], &params).unwrap();
+        let mut rng = StdRng::seed_from_u64(41);
+        let mut guard = InMemoryNonceGuard::new();
+        let sid = [3u8; 32];
+        let mut hashes = Vec::new();
+        let mut st1s = Vec::new();
+        for sk in &sks {
+            let (h, st1) = round1(sk, &params, 0b11, b"m", &sid, &mut rng, &mut guard).unwrap();
+            hashes.push(h);
+            st1s.push(st1);
+        }
+        let mut reveals = Vec::new();
+        let mut st2s = Vec::new();
+        for (i, st1) in st1s.into_iter().enumerate() {
+            let (r, st2) = round2(&sks[i], 0b11, b"m", &sid, &hashes, &hashes[i], st1, &params).unwrap();
+            reveals.push(r);
+            st2s.push(st2);
+        }
+        let k = params.k_reps as usize;
+        let size = pack_w_single_size();
+        let parsed: Vec<Vec<PolyVecK>> = reveals
+            .iter()
+            .map(|r| (0..k).map(|j| unpack_w_single(&r[j * size..(j + 1) * size])).collect())
+            .collect();
+        let wfinals = coordinator::aggregate_commitments(&parsed, k).unwrap();
+        let verified = verify_all_round2_reveals(&sks[0].tr, &[0, 1], 0b11, b"m", &sid, &reveals, &hashes, k).unwrap();
+        let st2 = st2s.into_iter().next().unwrap();
+        assert_eq!(round3(&alien[0], &wfinals, st2, &params, verified).err(), Some(Error::InvalidParameters));
     }
 }
