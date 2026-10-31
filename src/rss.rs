@@ -14,7 +14,8 @@
 //! 1. Each subset secret `s_I` is independently sampled from `χ_s`
 //! 2. The composite secret `s = Σ s_I` is computed as the sum
 //! 3. The public key `t = [A|I]·s` is derived from the sum
-//! 4. No existing key is decomposed — keys are always fresh
+//! 4. No existing key is decomposed — keys are always fresh (see
+//!    [`crate::aposteriori`] for sharing an existing key)
 //!
 //! ## Subset Encoding
 //!
@@ -35,6 +36,7 @@ use crate::poly::{Poly, PolyVecK, PolyVecL};
 use sha3::digest::{ExtendableOutput, Update, XofReader};
 use sha3::Shake256;
 use zeroize::Zeroize;
+use crate::aposteriori::SHARE_BOUND;
 
 /// A single subset's secret key: `(s₁_I, s₂_I)` where I ⊂ [N], |I| = N-T+1.
 /// Both vectors have coefficients drawn from `χ_s = U([-η, η])`.
@@ -144,7 +146,8 @@ impl ThresholdPrivateKey {
     /// Serialize this party's key for storage or transfer to the party.
     ///
     /// Format (version 1): `1 ‖ t ‖ n ‖ id ‖ ρ ‖ key ‖ tr ‖ count ‖
-    /// (mask ‖ s₁ ‖ s₂)*`, each share coefficient as one byte `c + η`.
+    /// (mask ‖ s₁ ‖ s₂)*`, each share coefficient as one byte `c + 10`
+    /// (fresh keys have `|c| ≤ η`, a posteriori shares `|c| ≤ 10`).
     /// The output contains secret material and is wiped on drop; protect it
     /// at rest and in transit.
     pub fn to_bytes(&self) -> Result<Zeroizing<Vec<u8>>, Error> {
@@ -160,10 +163,10 @@ impl ThresholdPrivateKey {
             out.push(mask);
             for p in share.s1.polys.iter().chain(share.s2.polys.iter()) {
                 for &c in &p.coeffs {
-                    if !(-(ETA as i32)..=ETA as i32).contains(&c) {
+                    if !(-SHARE_BOUND..=SHARE_BOUND).contains(&c) {
                         return Err(Error::InvalidShare);
                     }
-                    out.push((c + ETA as i32) as u8);
+                    out.push((c + SHARE_BOUND) as u8);
                 }
             }
         }
@@ -174,7 +177,7 @@ impl ThresholdPrivateKey {
     ///
     /// Rejects unknown versions, unsupported (T, N), wrong lengths, share
     /// sets that are not exactly the (N−T+1)-subsets containing this party,
-    /// and coefficients outside `[-η, η]`.
+    /// and coefficients outside `[-10, 10]`.
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, Error> {
         if bytes.len() < KEY_HEADER_BYTES || bytes[0] != KEY_FORMAT_VERSION {
             return Err(Error::InvalidParameters);
@@ -216,10 +219,10 @@ impl ThresholdPrivateKey {
             let mut share = Share::zero();
             for p in share.s1.polys.iter_mut().chain(share.s2.polys.iter_mut()) {
                 for (c, &b) in p.coeffs.iter_mut().zip(take(N)) {
-                    if b > 2 * ETA as u8 {
+                    if i32::from(b) > 2 * SHARE_BOUND {
                         return Err(Error::InvalidShare);
                     }
-                    *c = i32::from(b) - ETA as i32;
+                    *c = i32::from(b) - SHARE_BOUND;
                 }
             }
             share.s1h = share.s1.clone();

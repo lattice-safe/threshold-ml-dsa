@@ -281,7 +281,7 @@ fn private_key_serialization_roundtrip_and_validation() {
     assert!(ThresholdPrivateKey::from_bytes(&bad).is_err());
     let mut bad = good.to_vec();
     let last = bad.len() - 1;
-    bad[last] = 5; // coefficient out of [-η, η]
+    bad[last] = 21; // coefficient out of [-10, 10]
     assert!(ThresholdPrivateKey::from_bytes(&bad).is_err());
     assert!(ThresholdPrivateKey::from_bytes(&good[..good.len() - 1]).is_err());
     assert!(ThresholdPrivateKey::from_bytes(&good[..10]).is_err());
@@ -370,22 +370,65 @@ fn nonce_guard_prevents_nonce_reuse_with_stuck_rng() {
     assert_eq!(g.counter(&id), 43);
 }
 
-#[cfg(feature = "insecure-keygen")]
 #[test]
-fn insecure_aposteriori_rejects_malformed_secret_keys() {
-    use threshold_ml_dsa::aposteriori::insecure_share_existing_key;
+fn aposteriori_rejects_malformed_secret_keys() {
+    use rand::rngs::StdRng;
+    use rand::SeedableRng;
+    use threshold_ml_dsa::aposteriori::share_existing_key;
     use threshold_ml_dsa::verify;
+    let mut rng = StdRng::seed_from_u64(12);
     let params = get_threshold_params(2, 3).unwrap();
+    let mut share = |sk: &[u8]| share_existing_key(sk, &params, &mut rng);
     let (_, sk) = verify::keygen(&[12u8; 32]);
-    assert!(insecure_share_existing_key(&sk, &[0u8; 32], &params).is_ok());
+    assert!(share(&sk).is_ok());
 
     // tr no longer matches the key (bytes 64..128 hold tr).
     let mut bad = sk.to_vec();
     bad[64] ^= 1;
-    assert!(insecure_share_existing_key(&bad, &[0u8; 32], &params).is_err());
+    assert!(share(&bad).is_err());
 
     // s₁ coefficient outside [-η, η]: 3-bit value 7 decodes to η − 7 = −5.
     let mut bad = sk.to_vec();
     bad[128] = 0xFF; // first s₁ byte (sk = ρ ‖ K ‖ tr ‖ s₁ ‖ s₂ ‖ t₀)
-    assert!(insecure_share_existing_key(&bad, &[0u8; 32], &params).is_err());
+    assert!(share(&bad).is_err());
+}
+
+#[test]
+fn aposteriori_keys_serialize_and_sign_like_fresh_keys() {
+    use rand::rngs::StdRng;
+    use rand::SeedableRng;
+    use threshold_ml_dsa::rss::ThresholdPrivateKey;
+    use threshold_ml_dsa::sdk::ThresholdMlDsa44Sdk;
+    use threshold_ml_dsa::verify;
+
+    let mut rng = StdRng::seed_from_u64(2027);
+    let (pk, sk) = verify::keygen(&[21u8; 32]);
+    let params = get_threshold_params(3, 4).unwrap();
+    let (tpk, sks) = threshold_ml_dsa::aposteriori::share_existing_key(&sk, &params, &mut rng).unwrap();
+    assert_eq!(tpk[..], pk[..]);
+
+    // Gaussian shares exceed η; the key format must round-trip them.
+    let parsed: Vec<ThresholdPrivateKey> =
+        sks.iter().map(|k| ThresholdPrivateKey::from_bytes(&k.to_bytes().unwrap()).unwrap()).collect();
+
+    // Signing must succeed at about the same per-attempt rate as with fresh
+    // keys: the paper keeps all signing parameters unchanged (σ = √2 has the
+    // same variance as U([-2, 2])).
+    let mut shared = ThresholdMlDsa44Sdk::from_party_keys(tpk, parsed, 1).unwrap();
+    let mut fresh = ThresholdMlDsa44Sdk::from_seed(&[22u8; 32], 3, 4, 1).unwrap();
+    let (mut ok_shared, mut ok_fresh) = (0i32, 0i32);
+    let attempts = 200u32;
+    for i in 0..attempts {
+        let msg = i.to_le_bytes();
+        if let Ok(sig) = shared.threshold_sign(&[0, 2, 3], &msg, &mut rng) {
+            assert!(verify::verify(&sig, &msg, &pk));
+            ok_shared += 1;
+        }
+        if fresh.threshold_sign(&[0, 2, 3], &msg, &mut rng).is_ok() {
+            ok_fresh += 1;
+        }
+    }
+    assert!(ok_shared > 0 && ok_fresh > 0);
+    let diff = (ok_shared - ok_fresh).abs();
+    assert!(diff <= 40, "a posteriori {ok_shared}/{attempts} vs fresh {ok_fresh}/{attempts}");
 }

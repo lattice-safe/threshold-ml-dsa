@@ -11,8 +11,8 @@ A `#![no_std]`-compatible Rust implementation of threshold ML-DSA based on the M
 > **Security notice (v0.5.0).** Versions 0.3.1–0.4.0 had a hyperball sampler
 > bug that disabled rejection sampling; upgrade and consider rotating keys used
 > with them. 0.5.0 replaces the old DKG (which gave every party the full key)
-> with a real one, moves the (non-paper, insecure) a posteriori sharing behind the non-default
-> `insecure-keygen` feature, and supports only N ≤ 6. See
+> with a real one, replaces the insecure a posteriori sharing with the paper's
+> Gaussian sharing, and supports only N ≤ 6. See
 > [CHANGELOG.md](CHANGELOG.md).
 
 ---
@@ -50,8 +50,8 @@ Standard threshold signature schemes based on Shamir secret sharing introduce la
          │                      │                      │
          │             ┌────────▼────────┐    ┌────────▼────────┐
          │             │  aposteriori.rs │    │    dkg.rs       │
-         │             │ (insecure, not  │    │ 5-round DKG     │
-         │             │ paper's §3.4)   │    │ (slides 18–19)  │
+         │             │ Gaussian coset  │    │ 5-round DKG     │
+         │             │ sharing (§3.4)  │    │ (slides 18–19)  │
          │             └────────┬────────┘    └────────┬────────┘
          │                      │                      │
          │             ┌────────▼────────┐    ┌────────▼────────┐
@@ -130,15 +130,25 @@ let stored = my_key.to_bytes()?; // protect at rest
 
 `dkg::simulate` runs all parties in one process for tests.
 
-### Insecure: sharing an existing key (`insecure-keygen` feature)
+### 3. Sharing an existing key (a posteriori)
 
-`aposteriori::insecure_share_existing_key` / `insecure_from_existing_key`
-split an existing ML-DSA-44 key with uniform shares plus a remainder share.
-Coalitions smaller than T learn part of the original secret, and the remainder
-share is not short. This is **not** the paper's a posteriori sharing (§3.4 of
-the USENIX version), which samples Gaussian shares conditioned on their sum and
-bounds the loss at 7–12 bits of security; that algorithm is not implemented.
-It is kept for testing and interoperability experiments only.
+```rust
+// On the key owner's machine; the public key stays the same.
+let sdk = ThresholdMlDsa44Sdk::from_existing_key(&sk_bytes, t, n, 100, &mut rng)?;
+// or, to distribute keys: aposteriori::share_existing_key(&sk_bytes, &params, &mut rng)
+```
+
+This follows §3.4 of the paper: for every coefficient, the S subset shares
+are drawn jointly from a discrete Gaussian (σ = √2, the variance of fresh
+keygen) conditioned on their sum being the original coefficient. The coset
+Gaussian is sampled exactly and in constant time by rejection, instead of the
+paper's GPV sampler. Signing works unchanged.
+
+A short sharing of a fixed key always leaks a hint to T−1 parties. The paper
+estimates the loss at **up to 12 bits of security** for σ = √2 (heuristic; its
+formal 7-bit bound needs wider shares and parameters from the full version).
+Prefer fresh keys when the public key need not be kept, deliver each party's
+key over an encrypted channel, and delete the original secret key.
 
 ### Nonce safety
 
@@ -228,12 +238,12 @@ cargo bench --bench benchmarks -- --nocapture
 | `fvec` | Floating-point vector (`FVec`) + Box-Muller `SampleHyperball` + $L_2$ norm rejection |
 | `partition` | Algorithm 6 (`RSSRecover`) for $N \le 6$ |
 | `rss` | `keygen_from_seed()`: fresh independent secrets per subset (Fig. 5, USENIX version) |
-| `aposteriori` | **Insecure**, `insecure-keygen` only: split an existing ML-DSA-44 secret key |
+| `aposteriori` | Split an existing ML-DSA-44 secret key with Gaussian shares conditioned on their sum (§3.4) |
 | `dkg` | Distributed key generation: per-subset keys, joint coin, commit/reveal of `t_I`, confirm round |
 | `nonce` | `NonceGuard` / `InMemoryNonceGuard`: Round 1 nonce-reuse protection |
 | `sign` | 3-round party protocol: K-parallel commit, reveal, respond |
 | `coordinator` | K-parallel `Combine`: $\delta$-norm check, hint generation, FIPS 204 packing |
-| `sdk` | High-level API: `from_seed()`, `from_party_keys()`, `threshold_sign()`, `verify()` (plus `insecure_from_existing_key()` behind `insecure-keygen`) |
+| `sdk` | High-level API: `from_seed()`, `from_party_keys()`, `threshold_sign()`, `verify()`, `from_existing_key()` |
 | `verify` | Standard FIPS 204 verification via `dilithium-rs` (ML-DSA-44, ML-DSA-65, ML-DSA-87) |
 | `error` | `no_std`-compatible error handling |
 
@@ -244,9 +254,6 @@ cargo bench --bench benchmarks -- --nocapture
 ```bash
 # Run complete test suite
 cargo test --release
-
-# Include the insecure a posteriori sharing tests
-cargo test --release --features insecure-keygen
 
 # Security regression tests
 cargo test --release --test security_regressions

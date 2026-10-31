@@ -92,18 +92,19 @@ impl ThresholdMlDsa44Sdk {
         })
     }
 
-    /// Create a threshold SDK by splitting an existing standard ML-DSA-44 secret key.
+    /// Create a threshold SDK by splitting an existing standard ML-DSA-44
+    /// secret key with the paper's Gaussian a posteriori sharing (§3.4).
+    /// The public key is unchanged.
     ///
-    /// **Insecure** (requires the `insecure-keygen` feature): the shares
-    /// leak the original secret to coalitions smaller than T. This is not
-    /// the paper's a posteriori sharing; see [`crate::aposteriori`].
-    #[cfg(feature = "insecure-keygen")]
-    pub fn insecure_from_existing_key(
+    /// Short shares of a fixed key leak a hint about it to T−1 parties; the
+    /// paper estimates the loss at up to 12 bits of security (heuristic).
+    /// See [`crate::aposteriori`].
+    pub fn from_existing_key<R: RngCore + CryptoRng>(
         sk_bytes: &[u8],
-        seed: &[u8; 32],
         t: u8,
         n: u8,
         max_retries: usize,
+        rng: &mut R,
     ) -> Result<Self, Error> {
         let params = get_threshold_params(t, n).ok_or(Error::InvalidParameters)?;
 
@@ -111,7 +112,7 @@ impl ThresholdMlDsa44Sdk {
             return Err(Error::InvalidParameters);
         }
 
-        let (pk, sks) = crate::aposteriori::insecure_share_existing_key(sk_bytes, seed, &params)?;
+        let (pk, sks) = crate::aposteriori::share_existing_key(sk_bytes, &params, rng)?;
 
         Ok(Self {
             pk,

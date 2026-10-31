@@ -28,11 +28,6 @@ rand = "0.8"
 [features]
 default = ["std"]
 std = []
-# Exposes `aposteriori`, which DOES NOT provide threshold security: its
-# uniform-plus-remainder sharing of an existing key leaks the original secret
-# to sub-threshold coalitions. It is not the paper's Gaussian a posteriori
-# sharing. For testing and interoperability experiments only.
-insecure-keygen = []
 
 [[bench]]
 name = "benchmarks"

@@ -3,7 +3,6 @@
 use rand::rngs::StdRng;
 use rand::SeedableRng;
 use std::time::Instant;
-#[cfg(feature = "insecure-keygen")]
 use threshold_ml_dsa::params::SK_BYTES;
 use threshold_ml_dsa::dkg;
 use threshold_ml_dsa::{sdk::ThresholdMlDsa44Sdk, verify};
@@ -46,8 +45,6 @@ fn main() {
         println!("  Fresh Keygen ({}, {}): {:8.2?} / op", t, n, per_op);
     }
 
-    // Section 2 exercises an insecure key setup (feature `insecure-keygen`).
-    #[cfg(feature = "insecure-keygen")]
     {
         // ─── 2. A Posteriori Key Sharing Benchmarks ───────────────────────────
         println!("\n--- 2. A Posteriori Key Sharing (from_existing_key) ---");
@@ -55,11 +52,12 @@ fn main() {
         let mut sk_fixed = [0u8; SK_BYTES];
         sk_fixed.copy_from_slice(&sk_std);
 
-        for &(t, n) in &[(2, 2), (2, 3), (3, 4), (5, 6)] {
-            let iters = 100;
+        let mut rng = StdRng::seed_from_u64(2);
+        for &(t, n) in &[(2, 2), (2, 3), (3, 4), (4, 6), (5, 6)] {
+            let iters = 10;
             let start = Instant::now();
             for _ in 0..iters {
-                let _ = ThresholdMlDsa44Sdk::insecure_from_existing_key(&sk_fixed, &[1u8; 32], t, n, 10).unwrap();
+                let _ = ThresholdMlDsa44Sdk::from_existing_key(&sk_fixed, t, n, 10, &mut rng).unwrap();
             }
             let elapsed = start.elapsed();
             let per_op = elapsed / iters as u32;

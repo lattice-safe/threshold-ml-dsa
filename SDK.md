@@ -82,6 +82,12 @@ and advanced distributed orchestration.
 > When using low-level rounds, callers must enforce per-peer Round-2 reveal checks
 > and authenticated/replay-protected transport.
 
+### `ThresholdMlDsa44Sdk::from_existing_key(sk_bytes, t, n, max_retries, rng)`
+
+Share an existing ML-DSA-44 secret key (2560 bytes) without changing its
+public key, using the paper's Gaussian a posteriori sharing (§3.4). The paper
+estimates the security loss at up to 12 bits. See `aposteriori`.
+
 ### `ThresholdMlDsa44Sdk::from_party_keys(pk, sks, max_retries)`
 
 Build an SDK from existing party keys, e.g. from `dkg::simulate` or parsed

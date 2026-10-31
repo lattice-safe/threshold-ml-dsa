@@ -3,7 +3,6 @@
 //! Tests complete end-to-end flows for:
 //! 1. DKG -> Threshold Sign -> FIPS 204 Verify across all (T, N) setups
 //! 2. A Posteriori Key Sharing -> Threshold Sign -> FIPS 204 Verify
-//!    (`insecure-keygen` feature only)
 //! 3. DKG error handling, adversarial tampering and coalition privacy
 //! 4. Active signer set validation & edge case handling
 //! 5. Signature verification robustness (tampered signatures, wrong messages, wrong keys)
@@ -11,7 +10,6 @@
 
 use rand::rngs::StdRng;
 use rand::SeedableRng;
-#[cfg(feature = "insecure-keygen")]
 use threshold_ml_dsa::params::{PK_BYTES, SK_BYTES};
 use threshold_ml_dsa::{
     dkg::{self, DkgConfig, DkgParty, DkgSeedMsg},
@@ -146,7 +144,6 @@ fn test_dkg_sign_verify_with_non_canonical_active_sets() {
 
 // ─── 2. A Posteriori Key Sharing + Sign + Verify Tests ───────────────────
 
-#[cfg(feature = "insecure-keygen")]
 #[test]
 fn test_aposteriori_sign_verify_e2e_all_configs() {
     let mut rng = StdRng::seed_from_u64(777);
@@ -155,9 +152,18 @@ fn test_aposteriori_sign_verify_e2e_all_configs() {
         (2, 2),
         (2, 3),
         (3, 3),
+        (2, 4),
         (3, 4),
+        (4, 4),
+        (2, 5),
+        (3, 5),
         (4, 5),
+        (5, 5),
+        (2, 6),
+        (3, 6),
+        (4, 6),
         (5, 6),
+        (6, 6),
     ];
 
     for &(t, n) in configs {
@@ -167,7 +173,7 @@ fn test_aposteriori_sign_verify_e2e_all_configs() {
         sk_fixed.copy_from_slice(&sk_bytes);
 
         // Share the existing key
-        let mut sdk = ThresholdMlDsa44Sdk::insecure_from_existing_key(&sk_fixed, &[123u8; 32], t, n, 10)
+        let mut sdk = ThresholdMlDsa44Sdk::from_existing_key(&sk_fixed, t, n, 100, &mut rng)
             .unwrap_or_else(|e| panic!("A posteriori sharing failed for ({}, {}): {:?}", t, n, e));
 
         // Public key must be identical to original FIPS 204 public key

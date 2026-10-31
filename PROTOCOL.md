@@ -8,9 +8,9 @@
 > hyperball commitments for ML-DSA-44 with N ≤ 6, and FIPS 204-compatible
 > verification. The DKG (`dkg`) follows the outline in the Mithril slides;
 > the paper's own DKG is in the full version and has not been checked. The
-> a posteriori sharing module (`aposteriori`) is behind the non-default
-> `insecure-keygen` feature, is not the paper's §3.4 algorithm, and does not
-> provide threshold security.
+> a posteriori sharing module (`aposteriori`) implements §3.4 with an exact
+> coset Gaussian sampler (σ = √2); the paper estimates its security loss at
+> up to 12 bits.
 
 ---
 

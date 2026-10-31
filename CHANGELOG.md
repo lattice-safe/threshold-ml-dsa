@@ -19,14 +19,21 @@ Security fixes from an internal review. This release has breaking API changes.
   has not been checked. `dkg_round1/2`,
   `dkg_finalize`, `DkgContribution` and `from_dkg` are removed. **Keys created
   with the old `from_dkg` must be treated as compromised.**
-- **A posteriori sharing is behind the non-default `insecure-keygen` feature**
-  and renamed `insecure_share_existing_key` / `insecure_from_existing_key`.
-  It samples uniform shares plus a non-short remainder, which is not the
-  paper's algorithm (§3.4 of the USENIX version: Gaussian shares conditioned
-  on their sum, 7–12 bits of security loss), and coalitions smaller than T
-  learn part of the original secret. **Keys shared with `from_existing_key` must be
-  treated as compromised.** It now also rejects malformed secret keys
-  (coefficients outside `[-η, η]`, mismatched `tr`).
+- **A posteriori sharing now implements the paper's algorithm** (§3.4 of the
+  USENIX version). The old version sampled uniform shares and gave one
+  subset the non-short remainder `s − Σ others`, which leaked much more of
+  the original secret to coalitions smaller than T and broke the norm
+  assumption behind rejection sampling. **Keys shared with the old
+  `from_existing_key` must be treated as compromised.** The new
+  `aposteriori::share_existing_key` / `from_existing_key(sk, t, n,
+  max_retries, rng)` draw all shares jointly from a discrete Gaussian
+  (σ = √2, the variance of fresh keygen) conditioned on their sum being the
+  original secret, with an exact, constant-time rejection sampler instead of
+  the paper's GPV sampler. Shares are symmetric (no remainder share), signing
+  parameters are unchanged, and the public key is preserved. The paper
+  estimates the remaining loss at up to 12 bits of security (heuristic at
+  σ = √2). Malformed secret keys (coefficients outside `[-η, η]`, mismatched
+  `tr`) are rejected.
 - **Nonce-reuse protection.** `round1` takes a `NonceGuard` that refuses a
   repeated session ID per key and mixes a strictly increasing counter into the
   nonce seed. Previously a repeated RNG output let a coordinator replay a
@@ -67,6 +74,9 @@ Security fixes from an internal review. This release has breaking API changes.
 - `ThresholdMlDsa44Sdk::from_party_keys` to build an SDK from DKG or parsed keys.
 - `nonce::{NonceGuard, InMemoryNonceGuard}`, `ThresholdPrivateKey::guard_key_id`.
 - `dkg::simulate` to run a whole DKG in one process (tests, benchmarks).
+- `aposteriori::share_existing_key` and `ThresholdMlDsa44Sdk::from_existing_key`
+  (Gaussian a posteriori sharing, see above). Private key serialization
+  accepts share coefficients in `[-10, 10]` to hold Gaussian shares.
 - `ThresholdParams::validate`, `ThresholdPrivateKey::threshold`.
 
 ### Fixed
