@@ -70,15 +70,7 @@ pub fn keygen(seed: &[u8; 32]) -> (Vec<u8>, Zeroizing<Vec<u8>>) {
 ///
 /// This is used for reference comparison in tests.
 pub fn sign_standard(msg: &[u8], sk: &[u8], rng_seed: &[u8; 32]) -> Result<Vec<u8>, Error> {
-    if sk.len() != SK_BYTES {
-        return Err(Error::InvalidParameters);
-    }
-    let mode = dilithium::params::ML_DSA_44;
-    let mut sig = vec![0u8; mode.signature_bytes()];
-    if dilithium::sign::sign_signature(mode, &mut sig, msg, &[], rng_seed, sk) != 0 {
-        return Err(Error::InvalidParameters);
-    }
-    Ok(sig)
+    sign_with_context(dilithium::params::ML_DSA_44, SK_BYTES, msg, &[], sk, rng_seed)
 }
 
 /// Generate an ML-DSA-65 key pair.
@@ -90,15 +82,7 @@ pub fn keygen_65(seed: &[u8; 32]) -> (Vec<u8>, Zeroizing<Vec<u8>>) {
 
 /// Sign a message using standard ML-DSA-65.
 pub fn sign_standard_65(msg: &[u8], sk: &[u8], rng_seed: &[u8; 32]) -> Result<Vec<u8>, Error> {
-    if sk.len() != ml_dsa_65::SK_BYTES {
-        return Err(Error::InvalidParameters);
-    }
-    let mode = dilithium::params::ML_DSA_65;
-    let mut sig = vec![0u8; mode.signature_bytes()];
-    if dilithium::sign::sign_signature(mode, &mut sig, msg, &[], rng_seed, sk) != 0 {
-        return Err(Error::InvalidParameters);
-    }
-    Ok(sig)
+    sign_with_context(dilithium::params::ML_DSA_65, ml_dsa_65::SK_BYTES, msg, &[], sk, rng_seed)
 }
 
 /// Generate an ML-DSA-87 key pair.
@@ -110,12 +94,24 @@ pub fn keygen_87(seed: &[u8; 32]) -> (Vec<u8>, Zeroizing<Vec<u8>>) {
 
 /// Sign a message using standard ML-DSA-87.
 pub fn sign_standard_87(msg: &[u8], sk: &[u8], rng_seed: &[u8; 32]) -> Result<Vec<u8>, Error> {
-    if sk.len() != ml_dsa_87::SK_BYTES {
+    sign_with_context(dilithium::params::ML_DSA_87, ml_dsa_87::SK_BYTES, msg, &[], sk, rng_seed)
+}
+
+/// FIPS 204 `ML-DSA.Sign` for `mode` with context string `ctx`.
+fn sign_with_context(
+    mode: dilithium::params::DilithiumMode,
+    sk_len: usize,
+    msg: &[u8],
+    ctx: &[u8],
+    sk: &[u8],
+    rng_seed: &[u8; 32],
+) -> Result<Vec<u8>, Error> {
+    if sk.len() != sk_len {
         return Err(Error::InvalidParameters);
     }
-    let mode = dilithium::params::ML_DSA_87;
     let mut sig = vec![0u8; mode.signature_bytes()];
-    if dilithium::sign::sign_signature(mode, &mut sig, msg, &[], rng_seed, sk) != 0 {
+    // Fails only for a context longer than 255 bytes.
+    if dilithium::sign::sign_signature(mode, &mut sig, msg, ctx, rng_seed, sk) != 0 {
         return Err(Error::InvalidParameters);
     }
     Ok(sig)
@@ -149,5 +145,46 @@ mod tests {
         let sig = sign_standard_87(msg, &sk, &[99u8; 32]).unwrap();
         assert_eq!(sig.len(), ml_dsa_87::SIG_BYTES);
         assert!(verify_87(&sig, msg, &pk));
+    }
+}
+
+#[cfg(test)]
+mod coverage_tests {
+    use super::*;
+
+    #[test]
+    fn overlong_context_is_rejected() {
+        let (_, sk) = keygen(&[1u8; 32]);
+        let ctx = [0u8; 256];
+        assert_eq!(
+            sign_with_context(dilithium::params::ML_DSA_44, SK_BYTES, b"m", &ctx, &sk, &[0u8; 32]).err(),
+            Some(Error::InvalidParameters)
+        );
+        assert!(sign_with_context(dilithium::params::ML_DSA_44, SK_BYTES, b"m", &ctx[..255], &sk, &[0u8; 32]).is_ok());
+    }
+}
+
+#[cfg(test)]
+mod wrapper_tests {
+    use super::*;
+
+    #[test]
+    fn standard_signing_and_length_checks() {
+        let (pk, sk) = keygen(&[20u8; 32]);
+        let sig = sign_standard(b"m", &sk, &[0u8; 32]).unwrap();
+        assert!(verify(&sig, b"m", &pk));
+        assert!(!verify(&sig, b"m", &pk[1..]));
+        assert!(!verify(&sig[1..], b"m", &pk));
+        assert!(sign_standard(b"m", &sk[1..], &[0u8; 32]).is_err());
+
+        let (pk65, sk65) = keygen_65(&[21u8; 32]);
+        let sig65 = sign_standard_65(b"m", &sk65, &[0u8; 32]).unwrap();
+        assert!(verify_65(&sig65, b"m", &pk65));
+        assert!(!verify_65(&sig65, b"m", &pk65[1..]));
+
+        let (pk87, sk87) = keygen_87(&[22u8; 32]);
+        let sig87 = sign_standard_87(b"m", &sk87, &[0u8; 32]).unwrap();
+        assert!(verify_87(&sig87, b"m", &pk87));
+        assert!(!verify_87(&sig87, b"m", &pk87[1..]));
     }
 }

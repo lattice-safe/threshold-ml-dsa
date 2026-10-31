@@ -17,7 +17,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let seed = [42u8; 32]; // use OsRng in production
 
     // Create a 2-of-3 threshold SDK
-    let sdk = ThresholdMlDsa44Sdk::from_seed(
+    let mut sdk = ThresholdMlDsa44Sdk::from_seed(
         &seed,
         2,   // T (threshold)
         3,   // N (total parties)
@@ -148,7 +148,7 @@ from the ePrint 2026/013 full version (values as in the Go reference).
 
 ## Security Model
 
-- **No key decomposition**: Keys are generated fresh, not split from an existing ML-DSA key.
+- **Key sources**: fresh keys (`from_seed`, DKG) or, with a 7–12-bit security loss, a one-time Gaussian sharing of an existing ML-DSA key (`from_existing_key`; never share the same key twice).
 - **Fail-closed**: `Ok(sig)` is always verified before return; unsuccessful attempts return an error instead of an invalid signature.
 - **Read-only SDK surface**: internal key material/parameter fields are not publicly mutable; use accessor methods for inspection.
 - **In-process orchestrator**: The SDK runs all parties in-process. For distributed

@@ -4,10 +4,16 @@
 //! The float vector represents an element of `R_q^{ℓ+k`} in centered floating-point
 //! form, used for hyperball-based rejection sampling (ePrint 2026/013, §2.7).
 //!
-//! Security note: this module uses floating-point arithmetic (`f64`, `libm`) and
-//! therefore does not provide constant-time guarantees on typical hardware.
-//! Deployments with strict local side-channel requirements should isolate party
-//! execution and treat timing leakage in this path as part of the threat model.
+//! Side channels: the nonce is secret, so this module avoids software math
+//! routines that branch on their input. Sine/cosine use fixed polynomials on
+//! [0, π/2) with the quadrant applied through bit masks, and rounding uses
+//! the add-and-subtract-2⁵²·1.5 trick. What remains is hardware `f64`
+//! arithmetic and `sqrt` (a single instruction on aarch64 and x86_64 via
+//! `libm`), plus `libm::log`, which only branches on zero, negative,
+//! subnormal, infinite or exactly-1 inputs (none reachable here). FP
+//! instruction latency is input-independent on mainstream cores for normal
+//! operands; deployments with strict local side-channel requirements should
+//! still isolate party execution.
 
 extern crate alloc;
 
@@ -82,7 +88,7 @@ impl FVec {
     pub fn round_to_polyvecs(&self, s1: &mut PolyVecL, s2: &mut PolyVecK) {
         for i in 0..(L + K) {
             for j in 0..N {
-                let u = libm::round(self.coeffs[i * N + j]) as i32;
+                let u = round_ct(self.coeffs[i * N + j]) as i32;
                 // Map negative to [0, Q)
                 let t = u >> 31;
                 let mapped = u + (t & Q);
@@ -124,6 +130,57 @@ impl FVec {
         // excess iff lhs > rhs, i.e. rhs.wrapping_sub(lhs) has the high bit set
         (rhs.wrapping_sub(lhs) >> 63) == 1
     }
+}
+
+/// Round to nearest (ties to even) without branching; exact for |x| < 2⁵¹.
+///
+/// Adding 1.5·2⁵² moves the value into a binade where the unit in the last
+/// place is 1, so the FPU's round-to-nearest does the rounding. Ties
+/// (probability ~0 for continuous samples) go to even instead of away from
+/// zero as in `libm::round`.
+#[inline]
+pub(crate) fn round_ct(x: f64) -> f64 {
+    const MAGIC: f64 = 6_755_399_441_055_744.0; // 1.5 · 2⁵²
+    (x + MAGIC) - MAGIC
+}
+
+/// (cos θ, sin θ) for θ = 2π·u/2⁶⁴, computed without input-dependent branches.
+///
+/// The top two bits of `u` select the quadrant and the next 51 bits give
+/// θ' ∈ [0, π/2) (the same 53-bit resolution as `u as f64 / 2⁶⁴`). cos θ'
+/// and sin θ' come from fixed-length Taylor polynomials (truncation error
+/// below 10⁻²⁰ on [0, π/2]); the quadrant rotation is a branch-free swap and
+/// sign flip on the IEEE bit patterns.
+pub(crate) fn sincos_ct(u: u64) -> (f64, f64) {
+    let q = u >> 62;
+    let frac = ((u >> 11) & ((1u64 << 51) - 1)) as f64 / (1u64 << 51) as f64;
+    let x = frac * core::f64::consts::FRAC_PI_2;
+    let x2 = x * x;
+
+    // sin x = x(1 − x²/(2·3)(1 − x²/(4·5)(… (1 − x²/(24·25)))))
+    let mut s = 1.0f64;
+    let mut k = 24.0f64;
+    while k >= 2.0 {
+        s = 1.0 - x2 / (k * (k + 1.0)) * s;
+        k -= 2.0;
+    }
+    let s = x * s;
+    // cos x = 1 − x²/(1·2)(1 − x²/(3·4)(… (1 − x²/(25·26))))
+    let mut c = 1.0f64;
+    let mut k = 25.0f64;
+    while k >= 1.0 {
+        c = 1.0 - x2 / (k * (k + 1.0)) * c;
+        k -= 2.0;
+    }
+
+    // Quadrant q: (cos, sin) = (c, s), (−s, c), (−c, −s), (s, −c).
+    let swap = 0u64.wrapping_sub(q & 1);
+    let (cb, sb) = (c.to_bits(), s.to_bits());
+    let a = (cb & !swap) | (sb & swap);
+    let b = (sb & !swap) | (cb & swap);
+    let neg_a = ((q ^ (q >> 1)) & 1) << 63;
+    let neg_b = (q >> 1) << 63;
+    (f64::from_bits(a ^ neg_a), f64::from_bits(b ^ neg_b))
 }
 
 /// Sample a point uniformly in the ν-scaled hyperball B_{ν}(radius).
@@ -186,15 +243,15 @@ pub fn sample_hyperball(out: &mut FVec, radius: f64, nu: f64, rhop: &[u8; 64], n
 
         // Convert to float64 in [0, 1)
         let f1 = (u1 as f64) / ((1u128 << 64) as f64);
-        let f2 = (u2 as f64) / ((1u128 << 64) as f64);
 
         // Box-Muller transform
         // Clamp f1 to avoid log(0) — use fmax to avoid a data-dependent branch.
         let log_val = libm::fmax(f1, f64::MIN_POSITIVE);
         let r = libm::sqrt(-2.0 * libm::log(log_val));
-        let theta = 2.0 * core::f64::consts::PI * f2;
-        let z1 = r * libm::cos(theta);
-        let z2 = r * libm::sin(theta);
+        // θ = 2π·u2/2⁶⁴; libm's sin/cos branch on the (secret) angle.
+        let (cos_t, sin_t) = sincos_ct(u2);
+        let z1 = r * cos_t;
+        let z2 = r * sin_t;
 
         // Accumulate the norm of the UNSCALED Gaussian vector (all d+2
         // samples), matching Go SampleHyperball. ν is applied afterwards so
@@ -221,6 +278,28 @@ pub fn sample_hyperball(out: &mut FVec, radius: f64, nu: f64, rhop: &[u8; 64], n
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sincos_ct_matches_libm_in_every_quadrant() {
+        let mut u = 0x9E37_79B9_7F4A_7C15u64;
+        let mut worst = 0.0f64;
+        for i in 0..200_000u64 {
+            u = u.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            let v = if i < 4 { i << 62 } else { u }; // exact quadrant starts
+            let theta = 2.0 * core::f64::consts::PI * ((v >> 11) as f64 / (1u64 << 53) as f64);
+            let (c, s) = sincos_ct(v);
+            worst = worst.max((c - libm::cos(theta)).abs()).max((s - libm::sin(theta)).abs());
+        }
+        assert!(worst < 1e-14, "max error {worst}");
+    }
+
+    #[test]
+    fn round_ct_matches_libm_off_ties() {
+        for &x in &[0.0, 0.49, 0.51, -0.49, -0.51, 1.5e6 + 0.3, -1.5e6 - 0.7, 8_380_416.2, -3.999_999] {
+            assert_eq!(round_ct(x), libm::round(x), "{x}");
+        }
+        assert_eq!(round_ct(2.5), 2.0); // ties to even
+    }
 
     fn nu_norm(fv: &FVec, nu: f64) -> f64 {
         let mut sq = 0.0f64;

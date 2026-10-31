@@ -193,10 +193,7 @@ impl ThresholdParams {
 /// All sets use the same multiplicative factor ν = 3.
 #[must_use] 
 pub fn get_threshold_params(t: u8, n: u8) -> Option<ThresholdParams> {
-    if t < 2 || t > n || n as usize > MAX_PARTIES {
-        return None;
-    }
-
+    // The table below lists exactly the supported (T, N): 2 ≤ T ≤ N ≤ MAX_PARTIES.
     let nu = 3.0_f64;
 
     let (r, r1, k_reps) = match (t, n) {
@@ -248,9 +245,12 @@ pub const fn binomial(n: u8, k: u8) -> usize {
     result
 }
 
-/// Number of RSS subsets for a given (N, T): C(N, N-T+1)
+/// Number of RSS subsets for a given (N, T): C(N, N-T+1); 0 unless 1 ≤ T ≤ N.
 #[must_use] 
 pub const fn num_subsets(n: u8, t: u8) -> usize {
+    if t == 0 || t > n {
+        return 0;
+    }
     binomial(n, n - t + 1)
 }
 
@@ -284,8 +284,9 @@ mod tests {
             (6, 6),
         ];
         for (t, n) in valid {
-            let p = get_threshold_params(t, n)
-                .unwrap_or_else(|| panic!("Missing params for ({}, {})", t, n));
+            let p = get_threshold_params(t, n);
+            assert!(p.is_some(), "Missing params for ({t}, {n})");
+            let p = p.unwrap();
             assert!(p.r1 >= p.r, "r1 < r for ({}, {})", t, n);
             assert!(p.k_reps >= 2, "K < 2 for ({}, {})", t, n);
             assert!((p.nu - 3.0).abs() < 1e-10, "ν ≠ 3 for ({}, {})", t, n);
@@ -312,5 +313,41 @@ mod tests {
         assert_eq!(num_subsets(3, 2), 3); // C(3,2) = 3
         assert_eq!(num_subsets(4, 3), 6); // C(4,2) = 6
         assert_eq!(num_subsets(6, 2), 6); // C(6,5) = 6
+    }
+}
+
+#[cfg(test)]
+mod coverage_tests {
+    use super::*;
+
+    #[test]
+    fn unsupported_configurations_and_binomial_edges() {
+        assert!(get_threshold_params(1, 2).is_none());
+        assert!(get_threshold_params(3, 2).is_none());
+        assert!(get_threshold_params(2, 7).is_none());
+        assert_eq!(binomial(2, 3), 0);
+        assert_eq!(binomial(5, 0), 1);
+        assert_eq!(binomial(5, 5), 1);
+        assert_eq!(binomial(6, 4), 15);
+        let mut p = get_threshold_params(2, 3).unwrap();
+        assert!(p.validate().is_ok());
+        p.nu = f64::NAN;
+        assert!(p.validate().is_err());
+        p = get_threshold_params(2, 3).unwrap();
+        p.t = 7;
+        assert!(p.validate().is_err());
+    }
+}
+
+#[cfg(test)]
+mod review_tests {
+    use super::*;
+
+    #[test]
+    fn num_subsets_handles_invalid_input() {
+        assert_eq!(num_subsets(2, 5), 0);
+        assert_eq!(num_subsets(3, 0), 0);
+        assert_eq!(num_subsets(6, 3), 15); // C(6, 4)
+        assert_eq!(num_subsets(6, 4), 20); // C(6, 3)
     }
 }

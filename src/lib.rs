@@ -23,6 +23,7 @@
 //! ```
 
 #![cfg_attr(not(feature = "std"), no_std)]
+#![forbid(unsafe_code)]
 // Accepted pedantic lints for crypto coefficient arithmetic:
 #![allow(
     clippy::cast_possible_truncation,

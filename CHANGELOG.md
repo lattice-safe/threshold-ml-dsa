@@ -69,6 +69,27 @@ Security fixes from an internal review. This release has breaking API changes.
   SHAKE states are wiped on drop (`sha3` 0.10.9 with the `zeroize`
   feature), since a leftover XOF state can regenerate every key share.
 
+### Security (second review)
+
+- Side channel: Box–Muller used `libm` `sin`/`cos`, which branch on the
+  secret angle (leaking the sign of nonce coordinates), and `libm::round`,
+  which branches on the magnitude. Both are replaced with branch-free code.
+- `round3` refuses a nonce drawn by a different key; `round1` requires
+  exactly T active parties; `round2` checks the key's (T, N).
+- More secrets wiped: the nonce is sampled in place (no stack copy), A·y,
+  `sample_leq_eta` seed/XOF buffers, keygen temporaries (A·s₁, t₀), DKG coin
+  share before reveal, partial secret on error paths.
+- `from_party_keys` checks that all copies of a subset share agree and that
+  the shares reproduce the public key.
+- Coordinator aggregation rejects more than `MAX_PARTIES` inputs (i32
+  overflow); `Signature::to_bytes` rejects unencodable z; `reduce32` cannot
+  overflow; `num_subsets` no longer underflows; `Poly` pack/unpack check
+  lengths in release builds.
+- Docs: share an existing key at most once (each sharing adds a hint);
+  DKG termination is not unanimous; corrected stale nonce-reuse and
+  side-channel statements; `rust-version = "1.79"` (verified); Quick Start
+  compiles; `#![forbid(unsafe_code)]`.
+
 ### Added
 
 - `ThresholdPrivateKey::{to_bytes, from_bytes}`: versioned, validated key

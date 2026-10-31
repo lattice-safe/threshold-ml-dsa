@@ -84,3 +84,32 @@ impl fmt::Display for Error {
 
 #[cfg(feature = "std")]
 impl std::error::Error for Error {}
+
+#[cfg(test)]
+mod coverage_tests {
+    use super::*;
+    extern crate alloc;
+    use alloc::format;
+
+    #[test]
+    fn every_variant_has_a_message() {
+        let all = [
+            Error::LocalRejectionAbort,
+            Error::InvalidShare,
+            Error::InsufficientResponses,
+            Error::InvalidSignature,
+            Error::InvalidParameters,
+            Error::HintCheckFailed,
+            Error::SessionReplay,
+            Error::DkgMalformedMessage,
+            Error::DkgCommitmentMismatch { party: 3 },
+            Error::DkgSeedMismatch { dealer: 1, mask: 0b101 },
+            Error::DkgInconsistentTranscript,
+        ];
+        for e in &all {
+            assert!(!format!("{e}").is_empty());
+        }
+        assert!(format!("{}", Error::DkgCommitmentMismatch { party: 3 }).contains("party 3"));
+        assert!(format!("{}", Error::DkgSeedMismatch { dealer: 1, mask: 5 }).contains("0x05"));
+    }
+}

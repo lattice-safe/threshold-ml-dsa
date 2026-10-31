@@ -98,6 +98,7 @@ impl ThresholdMlDsa44Sdk {
     ///
     /// Short shares of a fixed key leak a hint about it to T−1 parties; the
     /// paper estimates the loss at up to 12 bits of security (heuristic).
+    /// **Share a key at most once**: every further sharing adds another hint.
     /// See [`crate::aposteriori`].
     pub fn from_existing_key<R: RngCore + CryptoRng>(
         sk_bytes: &[u8],
@@ -154,6 +155,34 @@ impl ThresholdMlDsa44Sdk {
                 return Err(Error::InvalidShare);
             }
         }
+        // Every copy of a subset share must agree, and Σ_I s_I must give pk.
+        let mut s1h_sum = PolyVecL::zero();
+        let mut s2_sum = PolyVecK::zero();
+        for mask in rss::subset_masks(n, t) {
+            let mut holders = sks.iter().filter_map(|sk| sk.shares.get(&mask));
+            let first = holders.next().ok_or(Error::InvalidShare)?;
+            let mut diff = 0i32;
+            for other in holders {
+                for (a, b) in first.s1.polys.iter().chain(&first.s2.polys).zip(other.s1.polys.iter().chain(&other.s2.polys)) {
+                    for (x, y) in a.coeffs.iter().zip(&b.coeffs) {
+                        diff |= x ^ y;
+                    }
+                }
+            }
+            if diff != 0 {
+                return Err(Error::InvalidShare);
+            }
+            s1h_sum.add_assign(&first.s1h);
+            s2_sum.add_assign(&first.s2);
+            s1h_sum.reduce();
+            s2_sum.reduce();
+        }
+        let consistent = rss::pk_from_t(&pk_rho(&pk), &rss::compute_t(&pk_rho(&pk), &s1h_sum, &s2_sum)) == pk;
+        s1h_sum.zeroize();
+        s2_sum.zeroize();
+        if !consistent {
+            return Err(Error::InvalidShare);
+        }
         Ok(Self {
             pk,
             sks,
@@ -205,7 +234,7 @@ impl ThresholdMlDsa44Sdk {
             prev = Some(id);
         }
 
-        'attempt: for _attempt in 0..self.max_retries {
+        for _attempt in 0..self.max_retries {
             // Session binding for this signing attempt.
             let mut session_entropy = [0u8; 32];
             rng.fill_bytes(&mut session_entropy);
@@ -238,7 +267,7 @@ impl ThresholdMlDsa44Sdk {
 
             for (idx, (&party_id, st1)) in active.iter().zip(rd1_states).enumerate() {
                 let sk = &self.sks[party_id as usize];
-                let (reveal, st2) = match sign::round2(
+                let (reveal, st2) = sign::round2(
                     sk,
                     act,
                     msg,
@@ -247,10 +276,7 @@ impl ThresholdMlDsa44Sdk {
                     &rd1_hashes[idx],
                     st1,
                     &self.params,
-                ) {
-                    Ok(v) => v,
-                    Err(_) => continue 'attempt,
-                };
+                )?;
                 rd2_reveals.push(reveal);
                 rd2_states.push(st2);
             }
@@ -272,10 +298,7 @@ impl ThresholdMlDsa44Sdk {
                 all_reveals.push(party_ws);
             }
 
-            let wfinals = match coordinator::aggregate_commitments(&all_reveals, k_reps) {
-                Ok(v) => v,
-                Err(_) => continue 'attempt,
-            };
+            let wfinals = coordinator::aggregate_commitments(&all_reveals, k_reps)?;
 
             // ── Round 3: Each party computes K responses ──
             // Each party independently verifies reveals and obtains its own
@@ -289,7 +312,7 @@ impl ThresholdMlDsa44Sdk {
 
                 // Each party verifies all reveals independently (as in a
                 // distributed deployment) and gets its own consumable witness.
-                let verified = match sign::verify_all_round2_reveals(
+                let verified = sign::verify_all_round2_reveals(
                     &sk.tr,
                     &active_ids,
                     act,
@@ -298,34 +321,20 @@ impl ThresholdMlDsa44Sdk {
                     &rd2_reveals,
                     &rd1_hashes,
                     k_reps,
-                ) {
-                    Ok(v) => v,
-                    Err(_) => continue 'attempt,
-                };
+                )?;
 
-                let zs = match sign::round3(sk, &wfinals, st2, &self.params, verified) {
-                    Ok(v) => v,
-                    Err(_) => continue 'attempt,
-                };
+                // Rejected slots come back zeroed; rejection shows up in combine.
+                let zs = sign::round3(sk, &wfinals, st2, &self.params, verified)?;
                 all_responses.push(zs);
             }
 
-            let zfinals = match coordinator::aggregate_responses(&all_responses, k_reps) {
-                Ok(v) => v,
-                Err(_) => continue 'attempt,
-            };
+            let zfinals = coordinator::aggregate_responses(&all_responses, k_reps)?;
 
             // ── Combine: try each of K slots ──
-            match coordinator::combine(&self.pk, msg, &wfinals, &zfinals, &self.params) {
-                Ok(sig) => {
-                    // Fail-closed: verify before returning
-                    if verify::verify(&sig, msg, &self.pk) {
-                        return Ok(sig);
-                    }
-                    // Signature didn't verify — retry
-                    continue;
-                }
-                Err(_) => continue,
+            // combine() only returns a signature that passes FIPS 204
+            // verification under `self.pk`.
+            if let Ok(sig) = coordinator::combine(&self.pk, msg, &wfinals, &zfinals, &self.params) {
+                return Ok(sig);
             }
         }
 
@@ -337,6 +346,13 @@ impl ThresholdMlDsa44Sdk {
     pub fn verify(&self, msg: &[u8], sig: &[u8]) -> bool {
         verify::verify(sig, msg, &self.pk)
     }
+}
+
+/// ρ, the first 32 bytes of a packed public key.
+fn pk_rho(pk: &[u8; PK_BYTES]) -> [u8; 32] {
+    let mut rho = [0u8; 32];
+    rho.copy_from_slice(&pk[..32]);
+    rho
 }
 
 #[cfg(test)]
@@ -387,5 +403,123 @@ mod tests {
             sdk.threshold_sign(&[0, 3], msg, &mut rng),
             Err(Error::InvalidParameters)
         );
+    }
+}
+
+#[cfg(test)]
+mod coverage_tests {
+    use super::*;
+    use rand::rngs::StdRng;
+    use rand::SeedableRng;
+
+    #[test]
+    fn constructors_reject_bad_input() {
+        let mut rng = StdRng::seed_from_u64(9);
+        let (_, sk) = verify::keygen(&[9u8; 32]);
+        assert_eq!(ThresholdMlDsa44Sdk::from_existing_key(&sk, 2, 3, 0, &mut rng).err(), Some(Error::InvalidParameters));
+        assert_eq!(ThresholdMlDsa44Sdk::from_existing_key(&sk, 2, 7, 1, &mut rng).err(), Some(Error::InvalidParameters));
+        assert_eq!(ThresholdMlDsa44Sdk::from_seed(&[0u8; 32], 2, 3, 0).err(), Some(Error::InvalidParameters));
+
+        let params = get_threshold_params(2, 3).unwrap();
+        let (pk, sks) = rss::keygen_from_seed(&[10u8; 32], &params).unwrap();
+        assert_eq!(ThresholdMlDsa44Sdk::from_party_keys(pk, Vec::new(), 1).err(), Some(Error::InvalidParameters));
+        let (_, mut two) = rss::keygen_from_seed(&[10u8; 32], &params).unwrap();
+        two.pop();
+        assert_eq!(ThresholdMlDsa44Sdk::from_party_keys(pk, two, 1).err(), Some(Error::InvalidParameters));
+        let (other_pk, _) = rss::keygen_from_seed(&[11u8; 32], &params).unwrap();
+        assert_eq!(ThresholdMlDsa44Sdk::from_party_keys(other_pk, sks, 1).err(), Some(Error::InvalidShare));
+
+        let sdk = ThresholdMlDsa44Sdk::from_seed(&[12u8; 32], 2, 3, 1).unwrap();
+        assert_eq!(sdk.num_parties(), 3);
+        assert_eq!(sdk.params().t, 2);
+        assert!(sdk.party_key(3).is_none());
+    }
+}
+
+#[cfg(test)]
+mod inconsistent_key_tests {
+    use super::*;
+    use rand::rngs::StdRng;
+    use rand::SeedableRng;
+
+    // `from_party_keys` refuses such key sets; these tests build them
+    // directly to check that signing fails loudly instead of retrying.
+
+    #[test]
+    fn swapped_party_keys_fail_round2() {
+        let mut sdk = ThresholdMlDsa44Sdk::from_seed(&[13u8; 32], 2, 2, 3).unwrap();
+        sdk.sks.swap(0, 1);
+        let mut rng = StdRng::seed_from_u64(13);
+        assert_eq!(sdk.threshold_sign(&[0, 1], b"m", &mut rng).err(), Some(Error::InvalidShare));
+    }
+
+    #[test]
+    fn mismatched_tr_fails_reveal_verification() {
+        let mut sdk = ThresholdMlDsa44Sdk::from_seed(&[14u8; 32], 2, 2, 3).unwrap();
+        sdk.sks[1].tr[0] ^= 1;
+        let mut rng = StdRng::seed_from_u64(14);
+        assert_eq!(sdk.threshold_sign(&[0, 1], b"m", &mut rng).err(), Some(Error::InvalidShare));
+    }
+}
+
+#[cfg(test)]
+mod signing_tests {
+    use super::*;
+    use rand::rngs::StdRng;
+    use rand::SeedableRng;
+
+    #[test]
+    fn party_keys_sign_and_verify() {
+        let params = get_threshold_params(2, 3).unwrap();
+        let (pk, mut sks) = rss::keygen_from_seed(&[16u8; 32], &params).unwrap();
+        sks.reverse(); // order does not matter
+        let mut sdk = ThresholdMlDsa44Sdk::from_party_keys(pk, sks, 50).unwrap();
+        assert_eq!(sdk.pk(), &pk);
+        let mut rng = StdRng::seed_from_u64(16);
+        let sig = sdk.threshold_sign(&[0, 2], b"msg", &mut rng).unwrap();
+        assert!(sdk.verify(b"msg", &sig));
+        assert!(!sdk.verify(b"other", &sig));
+        assert_eq!(sdk.threshold_sign(&[0], b"msg", &mut rng).err(), Some(Error::InvalidParameters));
+    }
+
+    #[test]
+    fn gives_up_after_max_retries() {
+        // One attempt per call: about 40% of calls at (2, 2) hit rejection
+        // in every slot and must report InsufficientResponses.
+        let mut sdk = ThresholdMlDsa44Sdk::from_seed(&[17u8; 32], 2, 2, 1).unwrap();
+        let mut rng = StdRng::seed_from_u64(17);
+        let failures = (0..40u32)
+            .filter(|i| sdk.threshold_sign(&[0, 1], &i.to_le_bytes(), &mut rng).err() == Some(Error::InsufficientResponses))
+            .count();
+        assert!(failures > 0);
+    }
+}
+
+#[cfg(test)]
+mod consistency_tests {
+    use super::*;
+
+    #[test]
+    fn from_party_keys_rejects_inconsistent_shares() {
+        let params = get_threshold_params(2, 3).unwrap();
+        // One holder's copy of a share differs.
+        let (pk, mut sks) = rss::keygen_from_seed(&[30u8; 32], &params).unwrap();
+        let mask = *sks[0].share_masks().next().unwrap();
+        sks[0].shares.get_mut(&mask).unwrap().s1.polys[0].coeffs[0] += 1;
+        assert_eq!(ThresholdMlDsa44Sdk::from_party_keys(pk, sks, 1).err(), Some(Error::InvalidShare));
+
+        // All copies changed consistently: shares no longer sum to pk. (A
+        // change to s₁ moves t₁ everywhere; a small change to s₂ may only
+        // move t₀, which pk does not contain.)
+        let (pk, mut sks) = rss::keygen_from_seed(&[31u8; 32], &params).unwrap();
+        for sk in &mut sks {
+            if let Some(sh) = sk.shares.get_mut(&mask) {
+                sh.s1.polys[0].coeffs[0] += 1;
+                sh.s1h = sh.s1.clone();
+                sh.s1h.reduce();
+                sh.s1h.ntt();
+            }
+        }
+        assert_eq!(ThresholdMlDsa44Sdk::from_party_keys(pk, sks, 1).err(), Some(Error::InvalidShare));
     }
 }

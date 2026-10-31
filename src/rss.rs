@@ -328,6 +328,7 @@ pub fn keygen_from_seed(
             tr: [0u8; TRBYTES],
             shares: BTreeMap::new(),
         });
+        key.zeroize();
     }
 
     // 3. Accumulator for the composite secret s = Σ s_I
@@ -383,10 +384,8 @@ pub fn keygen_from_seed(
         sseed.zeroize();
 
         // Gosper's hack: advance to next subset bitmask with same popcount
+        // (mask ≠ 0, so c ≠ 0)
         let c = mask & mask.wrapping_neg();
-        if c == 0 {
-            break;
-        }
         let r = mask.wrapping_add(c);
         if r >= limit {
             break;
@@ -435,6 +434,8 @@ pub(crate) fn sample_leq_eta(p: &mut Poly, seed: &[u8; 64], nonce: u16) {
     iv[65] = (nonce >> 8) as u8;
     h.update(&iv);
 
+    iv.zeroize();
+
     let mut reader = h.finalize_xof();
     let mut buf = [0u8; 136]; // SHAKE-256 rate
     let mut i = 0;
@@ -449,21 +450,22 @@ pub(crate) fn sample_leq_eta(p: &mut Poly, seed: &[u8; 64], nonce: u16) {
             let t2 = u32::from(*byte >> 4);
 
             // η=2: accept if < 15, reduce mod 5
-            if ETA == 2 {
-                if t1 <= 14 {
-                    let reduced = t1 - ((205 * t1) >> 10) * 5;
-                    p.coeffs[i] = ETA as i32 - reduced as i32;
-                    i += 1;
-                }
-                if t2 <= 14 && i < N {
-                    let reduced = t2 - ((205 * t2) >> 10) * 5;
-                    p.coeffs[i] = ETA as i32 - reduced as i32;
-                    i += 1;
-                }
+            if t1 <= 14 {
+                let reduced = t1 - ((205 * t1) >> 10) * 5;
+                p.coeffs[i] = ETA as i32 - reduced as i32;
+                i += 1;
+            }
+            if t2 <= 14 && i < N {
+                let reduced = t2 - ((205 * t2) >> 10) * 5;
+                p.coeffs[i] = ETA as i32 - reduced as i32;
+                i += 1;
             }
         }
     }
+    buf.zeroize();
 }
+
+const _: () = assert!(ETA == 2, "sample_leq_eta assumes η = 2");
 
 /// Compute the public key bytes: `pk = (ρ ‖ t₁_packed)`.
 ///
@@ -508,7 +510,8 @@ pub(crate) fn compute_t(rho: &[u8; 32], s1h: &PolyVecL, s2: &PolyVecK) -> PolyVe
     for i in 0..K {
         s2_d.vec[i].coeffs = s2.polys[i].coeffs;
     }
-    let t_copy = t.clone();
+    // t_copy = A·s₁, which together with the public t would give s₂.
+    let mut t_copy = t.clone();
     polyveck_add(mode, &mut t, &t_copy, &s2_d);
     // Threshold keygen accumulates subset secrets modulo q; after adding s2,
     // we must perform a full reduction before Power2Round.
@@ -519,7 +522,7 @@ pub(crate) fn compute_t(rho: &[u8; 32], s1h: &PolyVecL, s2: &PolyVecK) -> PolyVe
     for i in 0..K {
         out.polys[i].coeffs = t.vec[i].coeffs;
     }
-    for p in s1h_d.vec.iter_mut().chain(s2_d.vec.iter_mut()) {
+    for p in s1h_d.vec.iter_mut().chain(s2_d.vec.iter_mut()).chain(t_copy.vec.iter_mut()).chain(t.vec.iter_mut()) {
         p.coeffs.zeroize();
     }
     out
@@ -535,6 +538,11 @@ pub(crate) fn pk_from_t(rho: &[u8; 32], t: &PolyVecK) -> [u8; PK_BYTES] {
         let mut ti = DPoly::default();
         ti.coeffs = t.polys[i].coeffs;
         DPoly::power2round(&mut t1.vec[i], &mut t0.vec[i], &ti);
+        ti.coeffs.zeroize();
+    }
+    // t₀ is part of a standard ML-DSA secret key; do not leave it behind.
+    for p in &mut t0.vec {
+        p.coeffs.zeroize();
     }
 
     // Pack: pk = ρ ‖ t₁
@@ -705,5 +713,82 @@ mod tests {
             keygen_from_seed(&seed, &bad),
             Err(Error::InvalidParameters)
         ));
+    }
+}
+
+#[cfg(test)]
+mod coverage_tests {
+    use super::*;
+    extern crate alloc;
+    use alloc::format;
+
+    #[test]
+    fn serialization_errors_and_debug() {
+        let params = get_threshold_params(2, 3).unwrap();
+        let (_, mut sks) = keygen_from_seed(&[8u8; 32], &params).unwrap();
+        let s = format!("{:?}", sks[0]);
+        assert!(s.contains("id: 0") && !s.contains("rho"));
+        assert_eq!(sks[1].tr().len(), TRBYTES);
+
+        // Wrong subset mask in the encoding.
+        let mut bytes = sks[0].to_bytes().unwrap().to_vec();
+        let first_mask = KEY_HEADER_BYTES;
+        bytes[first_mask] ^= 0b100;
+        assert_eq!(ThresholdPrivateKey::from_bytes(&bytes).err(), Some(Error::InvalidShare));
+
+        // Coefficient outside [-10, 10] cannot be serialized.
+        let mask = *sks[0].share_masks().next().unwrap();
+        sks[0].shares.get_mut(&mask).unwrap().s1.polys[0].coeffs[0] = SHARE_BOUND + 1;
+        assert_eq!(sks[0].to_bytes().err(), Some(Error::InvalidShare));
+    }
+
+    #[test]
+    fn invalid_keygen_and_subset_inputs() {
+        let mut p = get_threshold_params(2, 3).unwrap();
+        p.t = 4;
+        assert_eq!(keygen_from_seed(&[0u8; 32], &p).err(), Some(Error::InvalidParameters));
+        assert!(enumerate_subsets(0, 0).is_empty());
+        assert!(enumerate_subsets(3, 4).is_empty());
+        assert_eq!(enumerate_subsets(3, 2).len(), 3);
+    }
+}
+
+#[cfg(test)]
+mod parse_tests {
+    use super::*;
+
+    #[test]
+    fn keys_round_trip_and_bad_headers_are_rejected() {
+        let params = get_threshold_params(3, 5).unwrap();
+        let (_, sks) = keygen_from_seed(&[15u8; 32], &params).unwrap();
+        for sk in &sks {
+            let bytes = sk.to_bytes().unwrap();
+            let back = ThresholdPrivateKey::from_bytes(&bytes).unwrap();
+            assert_eq!(back.to_bytes().unwrap()[..], bytes[..]);
+            assert_eq!((back.t, back.n, back.id, back.rho, back.key, back.tr), (sk.t, sk.n, sk.id, sk.rho, sk.key, sk.tr));
+            for (mask, share) in &sk.shares {
+                let other = &back.shares[mask];
+                assert!(share.s1h.polys.iter().zip(&other.s1h.polys).all(|(a, b)| a.coeffs == b.coeffs));
+                assert!(share.s2h.polys.iter().zip(&other.s2h.polys).all(|(a, b)| a.coeffs == b.coeffs));
+            }
+        }
+        let good = sks[0].to_bytes().unwrap();
+        let mut bad = good.to_vec();
+        bad[0] = 1; // old version
+        assert_eq!(ThresholdPrivateKey::from_bytes(&bad).err(), Some(Error::InvalidParameters));
+        let mut bad = good.to_vec();
+        bad[2] = 7; // unsupported N
+        assert_eq!(ThresholdPrivateKey::from_bytes(&bad).err(), Some(Error::InvalidParameters));
+        let mut bad = good.to_vec();
+        bad[3] = 5; // id ≥ N
+        assert_eq!(ThresholdPrivateKey::from_bytes(&bad).err(), Some(Error::InvalidParameters));
+        let mut bad = good.to_vec();
+        bad[KEY_HEADER_BYTES - 1] += 1; // share count
+        assert_eq!(ThresholdPrivateKey::from_bytes(&bad).err(), Some(Error::InvalidParameters));
+        assert_eq!(ThresholdPrivateKey::from_bytes(&good[..good.len() - 1]).err(), Some(Error::InvalidParameters));
+        let mut bad = good.to_vec();
+        let last = bad.len() - 1;
+        bad[last] = 21; // coefficient 11
+        assert_eq!(ThresholdPrivateKey::from_bytes(&bad).err(), Some(Error::InvalidShare));
     }
 }

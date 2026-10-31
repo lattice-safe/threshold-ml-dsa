@@ -60,7 +60,48 @@ pub fn rss_recover(active: &[u8], n: u8, t: u8) -> Result<Vec<Vec<u8>>, Error> {
     // Subset bitmasks: e.g., "01" = parties {0,1} = bitmask 0b11 = 3
     //                        "02" = parties {0,2} = bitmask 0b101 = 5
     // The Go reference uses these exact values.
-    let sharing: Vec<Vec<u8>> = match (t, n) {
+    let sharing = canonical_partition(t, n).ok_or(Error::InvalidParameters)?;
+
+    // Build the permutation φ: canonical party index → actual party ID
+    // (Algorithm 6, lines 23-31)
+    let mut perm = alloc::vec![0u8; n as usize];
+    let mut i1 = 0usize; // next slot for active parties
+    let mut i2 = t as usize; // next slot for inactive parties
+    for j in 0..n {
+        if active.contains(&j) {
+            perm[i1] = j;
+            i1 += 1;
+        } else {
+            perm[i2] = j;
+            i2 += 1;
+        }
+    }
+
+    // Apply the permutation to translate canonical subset bitmasks
+    // to actual subset bitmasks (Algorithm 6, lines 32-33)
+    let mut result = Vec::with_capacity(t as usize);
+    for party_shares in &sharing {
+        let mut translated = Vec::with_capacity(party_shares.len());
+        for &canonical_mask in party_shares {
+            let mut actual_mask: u8 = 0;
+            for bit in 0..n {
+                if canonical_mask & (1 << bit) != 0 {
+                    actual_mask |= 1 << perm[bit as usize];
+                }
+            }
+            translated.push(actual_mask);
+        }
+        result.push(translated);
+    }
+
+    Ok(result)
+}
+
+/// Hardcoded optimal partition for the canonical active set `{0, …, T−1}`
+/// (Algorithm 6, lines 3-22), or `None` for an unsupported `(T, N)` with
+/// `T < N`.
+fn canonical_partition(t: u8, n: u8) -> Option<Vec<Vec<u8>>> {
+    Some(match (t, n) {
         (2, 3) => alloc::vec![
             alloc::vec![3, 5], // party 0: subsets {0,1}=3, {0,2}=5
             alloc::vec![6],    // party 1: subset  {1,2}=6
@@ -111,87 +152,8 @@ pub fn rss_recover(active: &[u8], n: u8, t: u8) -> Result<Vec<Vec<u8>>, Error> {
             alloc::vec![9, 24, 40],  // {0,3}, {3,4}, {3,5}
             alloc::vec![48, 17, 18], // {4,5}, {0,4}, {1,4}
         ],
-        _ => compute_dynamic_partition(t, n),
-    };
-
-    // Build the permutation φ: canonical party index → actual party ID
-    // (Algorithm 6, lines 23-31)
-    let mut perm = alloc::vec![0u8; n as usize];
-    let mut i1 = 0usize; // next slot for active parties
-    let mut i2 = t as usize; // next slot for inactive parties
-    for j in 0..n {
-        if active.contains(&j) {
-            perm[i1] = j;
-            i1 += 1;
-        } else {
-            perm[i2] = j;
-            i2 += 1;
-        }
-    }
-
-    // Apply the permutation to translate canonical subset bitmasks
-    // to actual subset bitmasks (Algorithm 6, lines 32-33)
-    let mut result = Vec::with_capacity(t as usize);
-    for party_shares in &sharing {
-        let mut translated = Vec::with_capacity(party_shares.len());
-        for &canonical_mask in party_shares {
-            let mut actual_mask: u8 = 0;
-            for bit in 0..n {
-                if canonical_mask & (1 << bit) != 0 {
-                    actual_mask |= 1 << perm[bit as usize];
-                }
-            }
-            translated.push(actual_mask);
-        }
-        result.push(translated);
-    }
-
-    Ok(result)
-}
-
-/// Compute a greedy balanced partition for canonical active signers `{0, ..., T-1}`.
-///
-/// Iterates over all C(N, N-T+1) subsets of size `N-T+1`. Each subset is assigned
-/// to an eligible active signer in `{0, ..., T-1}` that currently holds the fewest
-/// assigned subsets.
-fn compute_dynamic_partition(t: u8, n: u8) -> Vec<Vec<u8>> {
-    let subset_size = n - t + 1;
-    let mut party_loads = alloc::vec![0usize; t as usize];
-    let mut sharing = alloc::vec![Vec::new(); t as usize];
-
-    let mut mask: u16 = (1u16 << subset_size) - 1;
-    let limit: u16 = 1u16 << n;
-
-    while mask < limit {
-        let subset_mask = mask as u8;
-
-        let mut min_load = usize::MAX;
-        let mut chosen_party = 0usize;
-
-        for p in 0..(t as usize) {
-            if (subset_mask & (1 << p)) != 0 {
-                if party_loads[p] < min_load {
-                    min_load = party_loads[p];
-                    chosen_party = p;
-                }
-            }
-        }
-
-        sharing[chosen_party].push(subset_mask);
-        party_loads[chosen_party] += 1;
-
-        let c = mask & mask.wrapping_neg();
-        if c == 0 {
-            break;
-        }
-        let r = mask.wrapping_add(c);
-        if r >= limit {
-            break;
-        }
-        mask = (((r ^ mask) >> 2) / c) | r;
-    }
-
-    sharing
+        _ => return None,
+    })
 }
 
 #[cfg(test)]
@@ -206,15 +168,7 @@ mod tests {
         all_subsets.dedup();
 
         let expected_count = num_subsets(n, t);
-        assert_eq!(
-            all_subsets.len(),
-            expected_count,
-            "(T={}, N={}): expected {} subsets, got {} (duplicates or missing)",
-            t,
-            n,
-            expected_count,
-            all_subsets.len()
-        );
+        assert_eq!(all_subsets.len(), expected_count, "(T={t}, N={n}): duplicate or missing subsets");
     }
 
     /// Verify each party only receives subsets it belongs to
@@ -273,7 +227,7 @@ mod tests {
     }
 
     #[test]
-    fn test_all_valid_configs_including_n7_n8() {
+    fn test_all_valid_configs() {
         let configs: &[(u8, u8)] = &[
             (2, 2),
             (2, 3),
@@ -315,5 +269,20 @@ mod tests {
         assert_eq!(rss_recover(&[2, 1], 3, 2), Err(Error::InvalidParameters));
         // Out of range.
         assert_eq!(rss_recover(&[0, 3], 3, 2), Err(Error::InvalidParameters));
+    }
+}
+
+#[cfg(test)]
+mod coverage_tests {
+    use super::*;
+
+    #[test]
+    fn invalid_inputs_are_rejected() {
+        assert!(rss_recover(&[0], 3, 2).is_err()); // wrong length
+        assert!(rss_recover(&[0, 1], 7, 2).is_err()); // N too large
+        assert!(rss_recover(&[0, 3], 3, 2).is_err()); // id ≥ N
+        assert!(rss_recover(&[1, 0], 3, 2).is_err()); // unsorted
+        assert!(canonical_partition(2, 7).is_none());
+        assert!(canonical_partition(3, 3).is_none()); // T = N handled by the caller
     }
 }

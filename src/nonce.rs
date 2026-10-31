@@ -129,3 +129,33 @@ impl NonceGuard for InMemoryNonceGuard {
         Ok(ctr)
     }
 }
+
+#[cfg(test)]
+mod coverage_tests {
+    use super::*;
+
+    fn reserve_via<G: NonceGuard>(mut g: G) -> Result<u64, Error> {
+        g.reserve(&[1u8; 32], &[2u8; 32])
+    }
+
+    #[test]
+    fn mut_ref_and_default_guards() {
+        let mut g = InMemoryNonceGuard::default();
+        assert_eq!(reserve_via(&mut g), Ok(0));
+        // Same session through the &mut impl is refused.
+        assert_eq!(reserve_via(&mut g), Err(Error::SessionReplay));
+        assert_eq!(g.counter(&[1u8; 32]), 1);
+    }
+
+    #[test]
+    fn eviction_and_counter_exhaustion() {
+        let key = [3u8; 32];
+        let mut g = InMemoryNonceGuard::with_capacity(1);
+        assert_eq!(g.reserve(&key, &[1u8; 32]), Ok(0));
+        assert_eq!(g.reserve(&key, &[2u8; 32]), Ok(1));
+        // [1; 32] was evicted, but the counter still moves forward.
+        assert_eq!(g.reserve(&key, &[1u8; 32]), Ok(2));
+        let mut g = InMemoryNonceGuard::new().with_start_counter(key, u64::MAX);
+        assert_eq!(g.reserve(&key, &[4u8; 32]), Err(Error::SessionReplay));
+    }
+}

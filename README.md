@@ -6,7 +6,7 @@ A `#![no_std]`-compatible Rust implementation of threshold ML-DSA based on the M
 
 [![Crates.io](https://img.shields.io/crates/v/threshold-ml-dsa.svg)](https://crates.io/crates/threshold-ml-dsa)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Rust](https://img.shields.io/badge/rust-1.70%2B-orange.svg)](https://www.rust-lang.org)
+[![Rust](https://img.shields.io/badge/rust-1.79%2B-orange.svg)](https://www.rust-lang.org)
 
 > **Security notice (v0.5.0).** Versions 0.3.1–0.4.0 had a hyperball sampler
 > bug that disabled rejection sampling; upgrade and consider rotating keys used
@@ -56,7 +56,7 @@ Standard threshold signature schemes based on Shamir secret sharing introduce la
          │                      │                      │
          │             ┌────────▼────────┐    ┌────────▼────────┐
          └────────────▶│    sign.rs      │◀───│  partition.rs   │
-                       │ K-parallel 3rnd │    │ Alg 6 + Dynamic │
+                       │ K-parallel 3rnd │    │ Alg. 6 tables   │
                        └────────┬────────┘    └─────────────────┘
                                 │
 ┌─────────────────┐    ┌────────▼────────┐    ┌─────────────────┐
@@ -81,7 +81,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let seed = [42u8; 32]; // Use secure seed in production
 
     // Create a 2-of-3 threshold SDK with fresh key generation
-    let sdk = ThresholdMlDsa44Sdk::from_seed(&seed, 2, 3, 100)?;
+    let mut sdk = ThresholdMlDsa44Sdk::from_seed(&seed, 2, 3, 100)?;
 
     // Sign message with active parties 0 and 1
     let msg = b"Hello, threshold ML-DSA!";
@@ -134,7 +134,7 @@ let stored = my_key.to_bytes()?; // protect at rest
 
 ```rust
 // On the key owner's machine; the public key stays the same.
-let sdk = ThresholdMlDsa44Sdk::from_existing_key(&sk_bytes, t, n, 100, &mut rng)?;
+let mut sdk = ThresholdMlDsa44Sdk::from_existing_key(&sk_bytes, t, n, 100, &mut rng)?;
 // or, to distribute keys: aposteriori::share_existing_key(&sk_bytes, &params, &mut rng)
 ```
 
@@ -149,6 +149,11 @@ estimates the loss at **up to 12 bits of security** for σ = √2 (heuristic; it
 formal 7-bit bound needs wider shares and parameters from the full version).
 Prefer fresh keys when the public key need not be kept, deliver each party's
 key over an encrypted channel, and delete the original secret key.
+
+**Share a key at most once.** Every sharing gives a sub-threshold coalition
+another independent hint on the same secret, so the loss grows with each
+re-sharing (to refresh shares, change (T, N) or replace a party, generate a
+new key with the DKG instead).
 
 ### Nonce safety
 
@@ -270,10 +275,11 @@ cargo test --test v03_tests
 - **Single-Use Nonces**: `round2()` consumes `StRound1` and `round3()` consumes `StRound2` by value, so a party reveals each commitment once and each nonce answers at most one challenge.
 - **Transcript Binding**: `round2()` checks that the party's own commitment is in its slot; `round3()` rejects non-canonical aggregates and witnesses from another session.
 - **Cryptographic Reveal Witness**: `verify_all_round2_reveals()` returns a bound witness token that `round3()` requires, enforcing round ordering.
-- **Hedged Nonce Generation**: Round 1 binds PRNG entropy + long-term key + transcript context + party ID. This does **not** protect against RNG rollback or repeated output (VM snapshots, forks): a repeated nonce reveals the party's partial secret. Each party's RNG must never repeat.
+- **Hedged Nonce Generation**: Round 1 binds PRNG entropy + long-term key + transcript context + party ID + a `NonceGuard` counter, so a repeated RNG output alone does not repeat a nonce. Rolling back the RNG **and** the guard state together (VM snapshots, restored backups) is not protected against.
 - **Fail-Closed SDK**: Output signatures are verified by the pure-Rust `dilithium-rs` FIPS 204 verifier before returning to caller.
-- **Zeroize-on-Drop (best effort)**: `FVec`, `StRound1`, `StRound2`, `ThresholdPrivateKey`, and `Share` implement `Zeroize` and `Drop`; nonce and secret intermediates are wiped explicitly. Copies inside `sha3` state and moved stack values are not wiped.
-- **100% Safe Rust**: Zero `unsafe` blocks across the codebase.
+- **Zeroize-on-Drop (best effort)**: `FVec`, `StRound1`, `StRound2`, `ThresholdPrivateKey`, and `Share` implement `Zeroize` and `Drop`; nonce and secret intermediates are wiped explicitly. `sha3` states are wiped on drop; copies left by moves of other stack values are not.
+- **100% Safe Rust**: `#![forbid(unsafe_code)]`.
+- **Side channels**: the nonce sampler uses branch-free sine/cosine and rounding instead of `libm`'s branching versions; hardware `f64` arithmetic and `sqrt` remain (see `fvec.rs`).
 
 ---
 

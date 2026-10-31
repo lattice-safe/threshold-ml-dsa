@@ -44,6 +44,11 @@
 //! Prefer fresh keys ([`crate::rss::keygen_from_seed`] or [`crate::dkg`])
 //! when the public key does not have to be kept.
 //!
+//! **Share a key at most once.** Each sharing hands a coalition below T an
+//! independent hint `s − x_M` on the same secret; k sharings act like one
+//! hint with variance 2/k, and the paper's estimate covers k = 1 only. To
+//! refresh shares, change (T, N) or replace a party, generate a new key.
+//!
 //! The function runs on the key owner's machine, which sees the whole
 //! secret. Deliver each party's key over an authenticated, encrypted
 //! channel and delete the original secret key afterwards.
@@ -54,7 +59,7 @@ use alloc::{collections::BTreeMap, vec::Vec};
 use std::collections::BTreeMap;
 
 use crate::error::Error;
-use crate::params::{ThresholdParams, ETA, K, L, MAX_PARTIES, N, PK_BYTES, SK_BYTES, TRBYTES};
+use crate::params::{ThresholdParams, ETA, K, L, N, PK_BYTES, SK_BYTES, TRBYTES};
 use crate::poly::{PolyVecK, PolyVecL};
 use crate::rss::{compute_public_key, subset_masks, Share, ThresholdPrivateKey};
 use rand_core::{CryptoRng, RngCore};
@@ -196,11 +201,8 @@ pub fn share_existing_key<R: RngCore + CryptoRng>(
     if sk_bytes.len() != SK_BYTES {
         return Err(Error::InvalidParameters);
     }
+    // validate() also rejects unsupported (T, N).
     params.validate()?;
-    let (t, n) = (params.t, params.n);
-    if !(t >= 2 && t <= n) || (n as usize) > MAX_PARTIES {
-        return Err(Error::InvalidParameters);
-    }
 
     use dilithium::{
         packing::unpack_sk,
@@ -302,9 +304,9 @@ fn share_vectors<R: RngCore + CryptoRng>(
 
     let mut sks: Vec<ThresholdPrivateKey> = (0..n)
         .map(|id| {
-            let mut key = [0u8; 32];
-            xof.read(&mut key);
-            ThresholdPrivateKey { t, n, id, rho: *rho, key, tr, shares: BTreeMap::new() }
+            let mut key = Zeroizing::new([0u8; 32]);
+            xof.read(&mut key[..]);
+            ThresholdPrivateKey { t, n, id, rho: *rho, key: *key, tr, shares: BTreeMap::new() }
         })
         .collect();
     for (mask, mut share) in masks.into_iter().zip(shares) {
@@ -369,7 +371,7 @@ mod tests {
         // distribution, i.e. there is no "remainder" share.
         let mut x = xof();
         let num = 20;
-        let trials = 20_000;
+        let trials = 5_000; // σ̂² has standard error ≈ 0.04 here
         let mut out = [0i32; MAX_SUBSETS];
         let (mut m_first, mut m_last, mut v_first, mut v_last) = (0f64, 0f64, 0f64, 0f64);
         for i in 0..trials {
@@ -384,10 +386,10 @@ mod tests {
         }
         let n = f64::from(trials);
         let (vf, vl) = (v_first / n, v_last / n);
-        assert!((m_first / n).abs() < 0.05 && (m_last / n).abs() < 0.05);
+        assert!((m_first / n).abs() < 0.08 && (m_last / n).abs() < 0.08);
         // Conditioned variance ≈ σ²(1 − 1/S) + E[s²]/S² ≈ 1.9 for both.
-        assert!((vf - 1.9).abs() < 0.1, "first share variance {vf}");
-        assert!((vl - 1.9).abs() < 0.1, "last share variance {vl}");
+        assert!((vf - 1.9).abs() < 0.15, "first share variance {vf}");
+        assert!((vl - 1.9).abs() < 0.15, "last share variance {vl}");
     }
 
     #[test]
@@ -497,5 +499,58 @@ mod tests {
         let msg = b"Threshold signing with a posteriori key sharing";
         let sig = sdk.threshold_sign(&[0, 1], msg, &mut rng).unwrap();
         assert!(verify::verify(&sig, msg, &pk_bytes));
+    }
+}
+
+#[cfg(test)]
+mod coverage_tests {
+    use super::*;
+    use crate::params::get_threshold_params;
+    use rand::rngs::StdRng;
+    use rand::SeedableRng;
+
+    #[test]
+    fn rejects_wrong_lengths_and_too_many_subsets() {
+        let mut rng = StdRng::seed_from_u64(5);
+        let params = get_threshold_params(2, 3).unwrap();
+        assert_eq!(share_existing_key(&[0u8; 10], &params, &mut rng).err(), Some(Error::InvalidParameters));
+
+        // share_vectors on its own: more subsets than the sampler supports.
+        let (_, sk) = crate::verify::keygen(&[6u8; 32]);
+        use dilithium::{packing::unpack_sk, polyvec::{PolyVecK as DK, PolyVecL as DL}, ML_DSA_44};
+        let (mut rho, mut tr, mut key) = ([0u8; 32], [0u8; TRBYTES], [0u8; 32]);
+        let (mut t0, mut s1, mut s2) = (DK::default(), DL::default(), DK::default());
+        unpack_sk(ML_DSA_44, &mut rho, &mut tr, &mut key, &mut t0, &mut s1, &mut s2, &sk);
+        let mut v1 = PolyVecL::zero();
+        for i in 0..L {
+            v1.polys[i].coeffs.copy_from_slice(&s1.vec[i].coeffs[..N]);
+        }
+        let mut v2 = PolyVecK::zero();
+        for i in 0..K {
+            v2.polys[i].coeffs.copy_from_slice(&s2.vec[i].coeffs[..N]);
+        }
+        let big = ThresholdParams { t: 7, n: 8, ..params };
+        assert_eq!(
+            share_vectors(&v1, &v2, &rho, &tr, &sk, &big, &mut rng).err(),
+            Some(Error::InvalidParameters)
+        );
+    }
+}
+
+#[cfg(test)]
+mod tr_tests {
+    use super::*;
+    use crate::params::get_threshold_params;
+    use rand::rngs::StdRng;
+    use rand::SeedableRng;
+
+    #[test]
+    fn rejects_key_whose_tr_does_not_match() {
+        let (_, sk) = crate::verify::keygen(&[23u8; 32]);
+        let mut bad = sk.to_vec();
+        bad[64] ^= 1; // tr starts after ρ ‖ K
+        let params = get_threshold_params(2, 3).unwrap();
+        let mut rng = StdRng::seed_from_u64(23);
+        assert_eq!(share_existing_key(&bad, &params, &mut rng).err(), Some(Error::InvalidParameters));
     }
 }

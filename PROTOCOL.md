@@ -493,8 +493,8 @@ $$\mathbf{z} = \left(\sum_i \mathbf{y}_i\right) + c \cdot \mathbf{s}_1$$
 
 This is **exactly** the standard ML-DSA response with the aggregate masking $\mathbf{y} = \sum_i \mathbf{y}_i$.
 
-> [!WARNING]
-> After summation, $\mathbf{z}$ must remain in **centered form** (via `reduce()` only, no `caddq()`). The `pack_z` function computes $\gamma_1 - z_{\text{coeff}}$ which requires centered coefficients in $[-(\gamma_1-1), \gamma_1]$. Mapping to $[0, q)$ via `caddq()` produces garbage.
+> [!NOTE]
+> `pack_z` centers its input mod $q$ first and then encodes $\gamma_1 - z$, so any representative of $\mathbf{z}$ works as long as the centered coefficients lie in $(-\gamma_1, \gamma_1]$.
 
 **Step 3 — L∞ check on aggregate (constant-time):**
 
@@ -571,7 +571,7 @@ The implementation defends against the following adversarial capabilities:
 |----|--------|---------|----------|
 | ADV-1 | Commitment equivocation between rounds | Commitment binding | Round-1 hash over `(tr,id,act,session,mu,w_packed)` must match Round-2 reveal |
 | ADV-2 | Replay of stale commitments across sessions/messages | Session binding | Commitment hash includes `session_id` and `mu = CRH(tr || msg)` |
-| ADV-3 | RNG rollback / nonce reuse | **Not mitigated** | Round-1 nonce seed binds RNG entropy + key material + transcript context, but the coordinator can replay the transcript, so a repeated RNG output reuses y and reveals s₁_I. Each party's RNG must never repeat. |
+| ADV-3 | RNG failure / nonce reuse | `NonceGuard` | `round1` refuses a repeated session ID per key and mixes a strictly increasing per-key counter into the nonce seed, so a repeated RNG output does not repeat y. Not covered: rolling back the RNG and the guard's state together. |
 | ADV-4 | Invalid aggregate emitted as success | Fail-closed verification | `combine()` and SDK path verify candidate signatures before returning |
 | ADV-5 | Hint/packing divergence from verifier path | Algebraic alignment | `f = Az - ct1*2^d - w`, centered low bits for `MakeHint`, centered `z` packing |
 
@@ -760,20 +760,20 @@ The threshold scheme inherits the _Module-LWE/Module-SIS_ hardness assumptions f
 
 ### Privacy
 
-- Share pieces are $\eta$-bounded random values — statistically independent of the secret
-- Subset shares are generated independently from SHAKE-derived seeds (no remainder-share decomposition)
+- Fresh keys (`rss`, `dkg`): subset shares are independent $\eta$-bounded values from SHAKE-derived seeds
+- A posteriori shares are Gaussian ($\sigma = \sqrt 2$) conditioned on their sum; a coalition below T learns a hint on the secret (paper §3.4: up to 12 bits of security, per sharing — share a key at most once)
 - Sensitive material ($\mathbf{s}_{1,i}$, $\mathbf{y}_i$, seeds) is zeroized on a best-effort basis via `zeroize`; copies made by `sha3` internal state and by moves of stack values are not wiped
 - Challenge and session binding comparisons use constant-time equality (`subtle::ConstantTimeEq`)
 - All norm checks (`chknorm`) iterate all coefficients/polynomials without early exit
-- Hyperball sampling/rejection uses floating-point (`f64`/`libm`) and should be treated as non-constant-time in strict side-channel models
+- Hyperball sampling uses branch-free sine/cosine and rounding; hardware `f64` arithmetic, `sqrt` and `libm::log` (branch-free on reachable inputs) remain
 
 ### Adversarial Resilience
 
 - **Malicious coordinator** cannot alter revealed commitments after Round 1 (ADV-1)
 - **Replay across sessions/messages** is detected by transcript-bound commitment hashes (ADV-2)
-- **RNG failure** is NOT mitigated: a repeated RNG output lets a coordinator recover the party's partial secret (ADV-3)
+- **RNG failure** is mitigated by `NonceGuard` unless the RNG and the guard state are rolled back together (ADV-3)
 - **Invalid aggregates** are blocked by fail-closed end-to-end verification (ADV-4)
-- **Timing side-channels**: The final hyperball rejection comparison (`FVec::excess`) uses branchless IEEE 754 bit-level ordering, and the Box-Muller clamp uses `libm::fmax` to avoid data-dependent branches. However, the underlying `f64`/`libm` arithmetic (log, sqrt, sin, cos, accumulation) is **not constant-time** on typical hardware. Deployments with strict local side-channel requirements should isolate party execution in separate processes or enclaves.
+- **Timing side-channels**: The final hyperball rejection comparison (`FVec::excess`) uses branchless IEEE 754 bit-level ordering, and the Box-Muller clamp uses `libm::fmax` to avoid data-dependent branches. Sine, cosine and rounding are computed without input-dependent branches (`libm`'s versions branch on the secret angle and magnitude). Hardware `f64` arithmetic and `sqrt` remain; their latency is input-independent for normal operands on mainstream cores, but this is not guaranteed on every platform. Deployments with strict local side-channel requirements should isolate party execution in separate processes or enclaves.
 
 ### Liveness
 
