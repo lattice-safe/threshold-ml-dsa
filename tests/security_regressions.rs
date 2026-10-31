@@ -43,12 +43,11 @@ fn all_supported_configs_sign_and_verify() {
 
 #[test]
 fn unsupported_party_counts_are_rejected() {
-    for n in 7..=8u8 {
-        for t in 2..=n {
-            assert!(get_threshold_params(t, n).is_none(), "({t}, {n}) must be unsupported");
-        }
+    // (5, 8), (6, 8), (7, 8) would need K in the thousands to tens of thousands.
+    for (t, n) in [(5u8, 8u8), (6, 8), (7, 8), (2, 9), (9, 9)] {
+        assert!(get_threshold_params(t, n).is_none(), "({t}, {n}) must be unsupported");
     }
-    assert_eq!(MAX_PARTIES, 6);
+    assert_eq!(MAX_PARTIES, 8);
 }
 
 #[test]
@@ -274,7 +273,7 @@ fn private_key_serialization_roundtrip_and_validation() {
     bad[0] = 1; // old version
     assert!(ThresholdPrivateKey::from_bytes(&bad).is_err());
     let mut bad = good.to_vec();
-    bad[2] = 7; // N = 7 unsupported
+    bad[2] = 9; // N = 9 unsupported
     assert!(ThresholdPrivateKey::from_bytes(&bad).is_err());
     let mut bad = good.to_vec();
     bad[3] = 5; // id ≥ N

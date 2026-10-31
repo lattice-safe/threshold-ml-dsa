@@ -345,7 +345,7 @@ fn test_dkg_rejects_malformed_round_messages() {
         Some(Error::InvalidParameters)
     );
     assert_eq!(
-        DkgParty::start(DkgConfig { t: 2, n: 7, me: 0, context: [0; 32] }, &mut rng).err(),
+        DkgParty::start(DkgConfig { t: 2, n: 9, me: 0, context: [0; 32] }, &mut rng).err(),
         Some(Error::InvalidParameters)
     );
 

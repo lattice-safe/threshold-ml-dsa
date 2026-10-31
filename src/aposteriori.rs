@@ -71,11 +71,15 @@ use zeroize::{Zeroize, Zeroizing};
 /// Largest share coefficient magnitude produced by a posteriori sharing.
 pub const SHARE_BOUND: i32 = 10;
 
-/// Proposals per coefficient in one constant-time batch.
+/// Proposals per coefficient in one constant-time batch (S ≤ 20 subsets).
 pub const TRIALS: usize = 128;
 
-/// Maximum number of subsets (C(6, 3) = 20).
-const MAX_SUBSETS: usize = 20;
+/// Proposals per batch for S > 20 subsets (N = 7, 8), where acceptance
+/// drops to ≈ 0.12: keeps batch failure below 2⁻⁵⁰ per key.
+pub const TRIALS_LARGE: usize = 448;
+
+/// Maximum number of subsets (C(8, 4) = 70).
+const MAX_SUBSETS: usize = 70;
 
 /// `CDT[i] = ⌊2⁶⁴ · P(X ≤ −10 + i)⌋` for `X ~ D_{Z,√2}` truncated to `[−10, 10]`.
 const CDT: [u64; 20] = [
@@ -163,7 +167,9 @@ fn share_coefficient(s: i32, out: &mut [i32], xof: &mut impl XofReader) -> bool 
     out.iter_mut().for_each(|o| *o = 0);
     // All-ones once a proposal has been accepted.
     let mut done = 0i32;
-    for _ in 0..TRIALS {
+    // The batch size depends only on the public subset count.
+    let trials = if num <= 20 { TRIALS } else { TRIALS_LARGE };
+    for _ in 0..trials {
         let mut sum = 0i32;
         for c in cand.iter_mut().take(num - 1) {
             *c = sample_gaussian(xof);
@@ -529,7 +535,7 @@ mod coverage_tests {
         for i in 0..K {
             v2.polys[i].coeffs.copy_from_slice(&s2.vec[i].coeffs[..N]);
         }
-        let big = ThresholdParams { t: 7, n: 8, ..params };
+        let big = ThresholdParams { t: 5, n: 9, ..params }; // C(9, 5) = 126 > 70
         assert_eq!(
             share_vectors(&v1, &v2, &rho, &tr, &sk, &big, &mut rng).err(),
             Some(Error::InvalidParameters)

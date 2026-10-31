@@ -12,7 +12,7 @@ A `#![no_std]`-compatible Rust implementation of threshold ML-DSA based on the M
 > bug that disabled rejection sampling; upgrade and consider rotating keys used
 > with them. 0.5.0 replaces the old DKG (which gave every party the full key)
 > with a real one, replaces the insecure a posteriori sharing with the paper's
-> Gaussian sharing, and supports only N ≤ 6. See
+> Gaussian sharing, and supports N ≤ 8 (except (5,8), (6,8), (7,8)). See
 > [CHANGELOG.md](CHANGELOG.md).
 
 ---
@@ -168,7 +168,7 @@ together (e.g. a VM snapshot) is not protected against.
 
 ## Supported Threshold Configurations
 
-The implementation includes paper-exact parameters for all 15 $(T, N)$ sets from ePrint 2026/013 (full version; the USENIX version defers per-(T, N) parameters to it). $N > 6$ is not supported:
+$N \le 6$ uses the 15 parameter sets of ePrint 2026/013 (full version, Fig. 9; values as in the Go reference). $N = 7, 8$ use parameters derived with the reference script `params/hyperball.sage` (ν = 3, per-attempt success ≈ 1/2, K at the −2σ bound of the Monte Carlo estimate) and max-flow balanced partitions as in `params/recover.py`; the paper gives no table for them. Measured per-attempt success: 0.43–0.53.
 
 | $(T, N)$ | Parallel Reps $K$ | Target Radius $r$ | Randomness Radius $r_1$ | Expansion $\nu$ |
 |---|---|---|---|---|
@@ -187,6 +187,21 @@ The implementation includes paper-exact parameters for all 15 $(T, N)$ sets from
 | (4, 6) | 74 | 268,705 | 268,831 | 3.0 |
 | (5, 6) | 100 | 250,590 | 250,686 | 3.0 |
 | (6, 6) | 37 | 219,245 | 219,301 | 3.0 |
+| (2, 7) | 4 | 313,939 | 314,051 | 3.0 |
+| (3, 7) | 31 | 285,453 | 285,601 | 3.0 |
+| (4, 7) | 322 | 261,941 | 262,110 | 3.0 |
+| (5, 7) | 1,071 | 241,018 | 241,166 | 3.0 |
+| (6, 7) | 1,008 | 220,521 | 220,633 | 3.0 |
+| (7, 7) | 91 | 192,000 | 192,055 | 3.0 |
+| (2, 8) | 4 | 313,939 | 314,051 | 3.0 |
+| (3, 8) | 58 | 291,228 | 291,406 | 3.0 |
+| (4, 8) | 1,195 | 267,837 | 268,048 | 3.0 |
+| (8, 8) | 227 | 182,918 | 182,974 | 3.0 |
+
+Cost per party and signing attempt is about 5.25 kB of traffic and 19.3 KB of
+memory per unit of K: (4, 8) ≈ 6.3 MB / 23 MB, (5, 7) ≈ 5.6 MB / 21 MB.
+(5, 8), (6, 8) and (7, 8) would need K ≈ 14,800, 38,500 and 5,200 (27–198 MB
+of traffic, 98–728 MB of memory per attempt) and are not supported.
 
 ---
 

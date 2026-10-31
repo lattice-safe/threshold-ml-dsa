@@ -5,9 +5,9 @@
 > This document describes the cryptographic protocol implemented in
 > `threshold-ml-dsa` v0.5.0, covering fresh key generation via Replicated
 > Secret Sharing (RSS), the 3-round threshold signing protocol with K-parallel
-> hyperball commitments for ML-DSA-44 with N ≤ 6, and FIPS 204-compatible
-> verification. The DKG (`dkg`) follows the outline in the Mithril slides;
-> the paper's own DKG is in the full version and has not been checked. The
+> hyperball commitments for ML-DSA-44 with N ≤ 8, and FIPS 204-compatible
+> verification. The DKG (`dkg`) follows the structure of the full version's
+> App. D, Fig. 13 (differences listed in `src/dkg.rs`). The
 > a posteriori sharing module (`aposteriori`) implements §3.4 with an exact
 > coset Gaussian sampler (σ = √2); the paper estimates its security loss at
 > up to 12 bits.
@@ -72,8 +72,8 @@
 
 | Parameter | Symbol | Description |
 |-----------|--------|-------------|
-| Max parties | $N_{\max}$ | $6$ (upper bound on $N$) |
-| K repetitions | $K$ | Parallel commitment slots (2–100, depends on (T,N)) |
+| Max parties | $N_{\max}$ | $8$ ((5,8), (6,8), (7,8) unsupported) |
+| K repetitions | $K$ | Parallel commitment slots (2–1195, depends on (T,N)) |
 | Hyperball radius | $r$ | ν-scaled L₂ norm bound for response rejection |
 | Commitment radius | $r_1$ | ν-scaled L₂ norm bound for randomness sampling |
 | Expansion factor | $\nu$ | 3 for ML-DSA-44 (scales first L·N coordinates) |

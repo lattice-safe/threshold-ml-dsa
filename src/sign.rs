@@ -213,7 +213,7 @@ pub fn round1<R: RngCore + CryptoRng, G: NonceGuard + ?Sized>(
         return Err(Error::InvalidParameters);
     }
     if sk.id >= params.n
-        || act >> params.n != 0
+        || u16::from(act) >> params.n != 0
         || act & (1 << sk.id) == 0
         || act.count_ones() != u32::from(params.t)
     {
@@ -351,7 +351,7 @@ pub fn round2(
     // our own slot must hold our own commitment; otherwise the aggregate
     // could exclude our w and leave the challenge under someone else's control.
     let active = bitmask_to_sorted_ids(act, params.n);
-    if act >> params.n != 0 || msgs_rd1.len() != active.len() {
+    if u16::from(act) >> params.n != 0 || msgs_rd1.len() != active.len() {
         return Err(Error::InvalidParameters);
     }
     let own_idx = active
@@ -455,7 +455,7 @@ pub fn round3(
     };
 
     params.validate()?;
-    if (sk.t, sk.n) != (params.t, params.n) || st_rd2.act >> params.n != 0 {
+    if (sk.t, sk.n) != (params.t, params.n) || u16::from(st_rd2.act) >> params.n != 0 {
         return Err(Error::InvalidParameters);
     }
     // The nonce must be answered by the key that drew it.

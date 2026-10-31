@@ -38,9 +38,9 @@ Security fixes from an internal review. This release has breaking API changes.
   repeated session ID per key and mixes a strictly increasing counter into the
   nonce seed. Previously a repeated RNG output let a coordinator replay a
   session and recover the party's partial secret from two responses.
-- **N = 7, 8 removed** (`MAX_PARTIES` is now 6). Their parameters were not
-  derived from the paper's formulas, and their radii are 0.46–0.90 of what the
-  rejection-sampling bound requires.
+- **N = 7, 8 parameters replaced.** The old ones were not derived from the
+  paper's formulas, and their radii were 0.46–0.90 of what the
+  rejection-sampling bound requires. They are re-derived below.
 - **`round2` consumes `StRound1` by value.** It previously borrowed it, so a
   party could be made to reveal again against a transcript whose peer
   commitments were chosen after its own reveal was seen.
@@ -68,6 +68,22 @@ Security fixes from an internal review. This release has breaking API changes.
   in `Zeroizing`. `Poly`'s `Debug` no longer prints a coefficient.
   SHAKE states are wiped on drop (`sha3` 0.10.9 with the `zeroize`
   feature), since a leftover XOF state can regenerate every key share.
+
+### N = 7, 8 support
+
+- `MAX_PARTIES` is 8. Parameters for N = 7, 8 are derived with the reference
+  script `params/hyperball.sage` (ν = 3, per-attempt success ≈ 1/2, K at the
+  −2σ bound), after checking that the same procedure reproduces the radii of
+  all 15 N ≤ 6 rows of the paper's Fig. 9. Balanced partitions come from the
+  max-flow procedure of `params/recover.py` (it reproduces the N ≤ 6 tables)
+  and are optimal. Measured per-attempt success is 0.43–0.53.
+- (5, 8), (6, 8), (7, 8) are not supported: they need K ≈ 14,800, 38,500 and
+  5,200 (27–198 MB of traffic and 98–728 MB of memory per party and attempt).
+- Fixed `act >> n` overflowing a `u8` when n = 8; a posteriori sharing
+  supports up to 70 subsets and uses a larger proposal batch above 20.
+- DKG docs now cite the full version's App. D, Fig. 13 and list the
+  differences; `DkgAwaitingConfirm::transcript_digest` exposes the value to
+  sign with long-term identity keys, as the paper does.
 
 ### Security (second review)
 
@@ -125,7 +141,7 @@ Security fixes from an internal review. This release has breaking API changes.
 - `sign::round3(sk, wfinals, st_rd2: StRound2, params, verified)` takes the
   Round 2 state by value and no longer takes `StRound1`.
 - `ThresholdMlDsa44Sdk::threshold_sign` takes `&mut self`.
-- `get_threshold_params` returns `None` for N > 6.
+- `get_threshold_params` returns `None` for N > 8 and for (5,8), (6,8), (7,8).
 - `Error` is `#[non_exhaustive]` and has new variants.
 - `verify::sign_standard*` return `Result`; `verify::keygen*` return the
   secret key as `Zeroizing<Vec<u8>>`; `Signature::to_bytes` returns `Result`.

@@ -132,11 +132,12 @@ pub mod ml_dsa_87 {
 
 // ─── Threshold-specific parameters (ePrint 2026/013) ─────────────────
 
-/// Maximum number of parties supported by the RSS scheme (N ≤ 6).
+/// Maximum number of parties supported by the RSS scheme (N ≤ 8).
 ///
-/// ePrint 2026/013 and the reference implementation only give parameters
-/// for N ≤ 6.
-pub const MAX_PARTIES: usize = 6;
+/// ePrint 2026/013 gives parameters for N ≤ 6; N = 7, 8 are derived here
+/// with the reference scripts (see [`get_threshold_params`]). Not every
+/// (T, 8) is supported.
+pub const MAX_PARTIES: usize = 8;
 
 /// Dimension of the `FVec` float vector: (K+L)×N coefficients.
 pub const FVEC_DIM: usize = (K + L) * N;
@@ -185,15 +186,28 @@ impl ThresholdParams {
 
 /// Lookup the paper parameters for a given (T, N) pair.
 ///
-/// Returns `None` if (T, N) is not in the supported range
-/// (2 ≤ T ≤ N ≤ 6).
+/// Returns `None` if (T, N) is unsupported: outside 2 ≤ T ≤ N ≤ 8, or one
+/// of (5, 8), (6, 8), (7, 8).
 ///
-/// Parameters from the ePrint 2026/013 full version (ML-DSA-44; values as in
-/// the Go reference). N = 7, 8 are not supported until parameters are derived with the paper's scripts.
+/// N ≤ 6: ePrint 2026/013 full version, Fig. 9 (values as in the Go
+/// reference). Note that Fig. 9's (2,4), (4,5), (5,5) radii correspond to
+/// ν = 3.5, 2.5, 2.5 in the reference script, and its K for (4,6), (5,6),
+/// (6,6) is below what the script gives (per-attempt success ≈ 0.39–0.46
+/// instead of 1/2); these values are kept for compatibility.
+///
+/// N = 7, 8: derived with the reference script `params/hyperball.sage`
+/// (ν = 3, per-attempt success 1/2, Monte Carlo for the final-check
+/// probabilities) and the max-flow partitions of `params/recover.py`. K is
+/// the value at the −2σ lower bound of the estimated success probability.
+/// Per party and attempt, communication is about 32 + 5248·K bytes and
+/// signer state about 19.3 KB·K: e.g. (4, 8) ≈ 6.3 MB / 23 MB. (5, 8),
+/// (6, 8) and (7, 8) would need K = 14 785, 38 473 and 5 162 (76–198 MB of
+/// traffic, 98–728 MB of memory per attempt) and are not supported.
+///
 /// All sets use the same multiplicative factor ν = 3.
 #[must_use] 
 pub fn get_threshold_params(t: u8, n: u8) -> Option<ThresholdParams> {
-    // The table below lists exactly the supported (T, N): 2 ≤ T ≤ N ≤ MAX_PARTIES.
+    // The table below lists exactly the supported (T, N).
     let nu = 3.0_f64;
 
     let (r, r1, k_reps) = match (t, n) {
@@ -212,6 +226,16 @@ pub fn get_threshold_params(t: u8, n: u8) -> Option<ThresholdParams> {
         (4, 6) => (268705.0, 268831.0, 74),
         (5, 6) => (250590.0, 250686.0, 100),
         (6, 6) => (219245.0, 219301.0, 37),
+        (2, 7) => (313939.0, 314051.0, 4),
+        (3, 7) => (285453.0, 285601.0, 31),
+        (4, 7) => (261941.0, 262110.0, 322),
+        (5, 7) => (241018.0, 241166.0, 1071),
+        (6, 7) => (220521.0, 220633.0, 1008),
+        (7, 7) => (192000.0, 192055.0, 91),
+        (2, 8) => (313939.0, 314051.0, 4),
+        (3, 8) => (291228.0, 291406.0, 58),
+        (4, 8) => (267837.0, 268048.0, 1195),
+        (8, 8) => (182918.0, 182974.0, 227),
         _ => return None,
     };
 
@@ -324,7 +348,8 @@ mod coverage_tests {
     fn unsupported_configurations_and_binomial_edges() {
         assert!(get_threshold_params(1, 2).is_none());
         assert!(get_threshold_params(3, 2).is_none());
-        assert!(get_threshold_params(2, 7).is_none());
+        assert!(get_threshold_params(2, 9).is_none());
+        assert!(get_threshold_params(5, 8).is_none()); // impractical K
         assert_eq!(binomial(2, 3), 0);
         assert_eq!(binomial(5, 0), 1);
         assert_eq!(binomial(5, 5), 1);
@@ -342,6 +367,20 @@ mod coverage_tests {
 #[cfg(test)]
 mod review_tests {
     use super::*;
+
+    #[test]
+    fn n7_n8_rows_exist_except_impractical_ones() {
+        for n in 7..=8u8 {
+            for t in 2..=n {
+                let unsupported = n == 8 && (5..=7).contains(&t);
+                let p = get_threshold_params(t, n);
+                assert_eq!(p.is_none(), unsupported, "({t}, {n})");
+                if let Some(p) = p {
+                    assert!(p.validate().is_ok() && p.r < p.r1 && p.k_reps >= 4);
+                }
+            }
+        }
+    }
 
     #[test]
     fn num_subsets_handles_invalid_input() {

@@ -375,8 +375,9 @@ mod tests {
         assert!(ThresholdMlDsa44Sdk::from_seed(&seed, 1, 2, 10).is_err());
         // T > N
         assert!(ThresholdMlDsa44Sdk::from_seed(&seed, 3, 2, 10).is_err());
-        // N > 6
-        assert!(ThresholdMlDsa44Sdk::from_seed(&seed, 2, 7, 10).is_err());
+        // N > 8, and an unsupported N = 8 threshold
+        assert!(ThresholdMlDsa44Sdk::from_seed(&seed, 2, 9, 10).is_err());
+        assert!(ThresholdMlDsa44Sdk::from_seed(&seed, 6, 8, 10).is_err());
         // max_retries = 0
         assert!(ThresholdMlDsa44Sdk::from_seed(&seed, 2, 2, 0).is_err());
     }
@@ -417,7 +418,7 @@ mod coverage_tests {
         let mut rng = StdRng::seed_from_u64(9);
         let (_, sk) = verify::keygen(&[9u8; 32]);
         assert_eq!(ThresholdMlDsa44Sdk::from_existing_key(&sk, 2, 3, 0, &mut rng).err(), Some(Error::InvalidParameters));
-        assert_eq!(ThresholdMlDsa44Sdk::from_existing_key(&sk, 2, 7, 1, &mut rng).err(), Some(Error::InvalidParameters));
+        assert_eq!(ThresholdMlDsa44Sdk::from_existing_key(&sk, 2, 9, 1, &mut rng).err(), Some(Error::InvalidParameters));
         assert_eq!(ThresholdMlDsa44Sdk::from_seed(&[0u8; 32], 2, 3, 0).err(), Some(Error::InvalidParameters));
 
         let params = get_threshold_params(2, 3).unwrap();

@@ -2,12 +2,28 @@
 //!
 //! Produces the same replicated-secret-sharing key structure as
 //! [`crate::rss::keygen_from_seed`] without any party learning the full
-//! secret. It follows the outline in the Mithril slides (NIST MPTS 2026,
-//! slides 18–19): exchange a key `K_I` within each (N−T+1)-subset `I`,
-//! jointly sample a coin, derive `s_I = H(coin, K_I)`, commit-and-reveal
-//! `t_I = A·s₁_I + s₂_I`, and set `t = Σ t_I`. The USENIX version of
-//! ePrint 2026/013 defers the DKG to the full version, which has not been
-//! checked; message formats and checks here are this crate's own.
+//! secret. It follows the structure of the paper's DKG (ePrint 2026/013 full
+//! version, App. D, Fig. 13): the lowest member of each (N−T+1)-subset `I`
+//! sends a key `K_I` privately to the other members, the parties
+//! commit-and-reveal a joint coin, `s_I = H(I, K_I, coin)`, each
+//! `t_I = A·s₁_I + s₂_I` is committed and then revealed, and
+//! `t = Σ t_I` goes through Power2Round.
+//!
+//! Differences from Fig. 13 (none weakens it; encodings are this crate's own):
+//! - `K_I` is also committed in round 0. The paper binds it only by
+//!   delivery timing; the commitment catches a bad key one round earlier.
+//! - A session ID (hash of all round-0 messages) and the application
+//!   `context` are bound into every later message and hash.
+//! - Transcript agreement uses a separate round of unsigned digests over an
+//!   authenticated broadcast. The paper instead signs the transcript with
+//!   long-term keys (a PKI); to get that, sign
+//!   [`DkgAwaitingConfirm::transcript_digest`] with your identity keys.
+//! - `tr` is the 64-byte FIPS 204 `H(pk)` (the paper writes a 256-bit
+//!   `H(ρ‖t₁)`), which standard ML-DSA verification requires.
+//! - Five message rounds instead of four.
+//!
+//! The paper's DKG security argument is informal (App. D.3); its
+//! unforgeability theorem assumes the trusted dealer of Fig. 5.
 //!
 //! ## Rounds
 //!
@@ -30,7 +46,9 @@
 //! - A coalition of at most T−1 parties misses at least one subset `M`
 //!   (`M ∩ C = ∅`); its dealer is honest and `K_M` never leaves `M`. The
 //!   coalition sees `t_M`, a fresh MLWE sample under the same `A` as an
-//!   ML-DSA public key (the paper also publishes every `vk_I`).
+//!   ML-DSA public key. Fig. 13 also publishes every `t_I`; the proof's
+//!   key-replacement step handles one honest `t_I`, and a standard
+//!   multi-sample MLWE hybrid covers the rest.
 //! - `K_I` and `c_i` are committed before the coin is revealed, so a
 //!   dealer cannot grind `s_I` for a subset that has an honest member, and
 //!   no party can bias `ρ` other than by aborting.
@@ -44,7 +62,8 @@
 //!   (attributable over an authenticated broadcast). Each abort-and-restart
 //!   lets it pick among candidate keys (a log₂(restarts)-bit choice, which
 //!   does not weaken ML-DSA); restarting without the party means a new
-//!   party set and a new (T, N).
+//!   party set and a new (T, N). (The paper's "cannot bias" claim does not
+//!   consider abort-and-restart.)
 //! - Termination is not unanimous: a party can send a correct digest to some
 //!   honest parties and a wrong one to others, so some finalize and some
 //!   abort. Do not use the public key until every party has confirmed
@@ -610,6 +629,15 @@ impl DkgAwaitingReveals {
 }
 
 impl DkgAwaitingConfirm {
+    /// Digest of this party's view of the transcript (session ID, coin,
+    /// public key, all `t_I` commitments), the value exchanged in the
+    /// confirm round. Applications with long-term identity keys can sign it
+    /// before broadcasting, as the paper's Fig. 13 does.
+    #[must_use]
+    pub fn transcript_digest(&self) -> [u8; 32] {
+        self.digest
+    }
+
     /// Final step: output the key only if every party saw the same transcript.
     pub fn finalize(mut self, confirms: &[DkgConfirmMsg]) -> Result<([u8; PK_BYTES], ThresholdPrivateKey), Error> {
         check_senders(&mut confirms.iter().map(|m| m.from), self.cfg.n)?;
@@ -1013,6 +1041,7 @@ mod protocol_tests {
             confirms.push(c);
         }
         assert!(confirms.iter().all(|c| c.digest == confirms[0].digest));
+        assert!(st4.iter().all(|s| s.transcript_digest() == confirms[0].digest));
         confirms[2].digest[0] ^= 1;
         let s0 = st4.into_iter().next().unwrap();
         assert_eq!(s0.finalize(&confirms).err(), Some(Error::DkgInconsistentTranscript));

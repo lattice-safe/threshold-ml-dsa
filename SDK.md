@@ -46,7 +46,7 @@ Fig. 5 (USENIX version) keygen: each RSS subset gets an independently sampled se
 **Parameters:**
 - `seed: &[u8; 32]` — deterministic seed (use `OsRng` in production)
 - `t: u8` — threshold (minimum parties to sign, 2 ≤ T ≤ N)
-- `n: u8` — total parties (2 ≤ N ≤ 6)
+- `n: u8` — total parties (2 ≤ N ≤ 8; (5,8), (6,8), (7,8) unsupported)
 - `max_retries: usize` — max full-protocol retry attempts
 
 **Returns:** `Result<Self, Error>`
@@ -143,8 +143,10 @@ threshold_sign(active, msg, rng)
 
 ## Supported Configurations
 
-All (T, N) pairs with 2 ≤ T ≤ N ≤ 6 are supported, using exact parameters
-from the ePrint 2026/013 full version (values as in the Go reference).
+All (T, N) pairs with 2 ≤ T ≤ N ≤ 6 use the parameters of the ePrint
+2026/013 full version (values as in the Go reference). For N = 7, 8, all
+pairs except (5,8), (6,8), (7,8) are supported with parameters derived by the
+reference script; see the README for K and costs.
 
 ## Security Model
 

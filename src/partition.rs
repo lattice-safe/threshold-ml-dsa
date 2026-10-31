@@ -152,6 +152,53 @@ fn canonical_partition(t: u8, n: u8) -> Option<Vec<Vec<u8>>> {
             alloc::vec![9, 24, 40],  // {0,3}, {3,4}, {3,5}
             alloc::vec![48, 17, 18], // {4,5}, {0,4}, {1,4}
         ],
+        // N = 7, 8: max-flow balanced partitions (same procedure as the
+        // reference `params/recover.py`; it reproduces the N ≤ 6 tables above).
+        (2, 7) => alloc::vec![
+            alloc::vec![125, 95, 111, 119],
+            alloc::vec![63, 126, 123],
+        ],
+        (3, 7) => alloc::vec![
+            alloc::vec![79, 87, 103, 59, 121, 47, 55],
+            alloc::vec![91, 118, 122, 94, 110, 107, 115],
+            alloc::vec![109, 117, 93, 61, 31, 62, 124],
+        ],
+        (4, 7) => alloc::vec![
+            alloc::vec![27, 51, 75, 23, 113, 43, 71, 83, 39],
+            alloc::vec![58, 114, 46, 99, 86, 102, 78, 90, 54],
+            alloc::vec![45, 53, 116, 92, 101, 108, 60, 77, 85],
+            alloc::vec![120, 105, 89, 30, 29, 15, 57, 106],
+        ],
+        (5, 7) => alloc::vec![
+            alloc::vec![19, 21, 97, 13, 67, 35, 7],
+            alloc::vec![42, 70, 14, 26, 98, 38, 74],
+            alloc::vec![52, 76, 44, 69, 37, 84, 100],
+            alloc::vec![88, 25, 104, 11, 73, 56, 41],
+            alloc::vec![82, 28, 81, 112, 50, 49, 22],
+        ],
+        (6, 7) => alloc::vec![
+            alloc::vec![3, 5, 17, 65],
+            alloc::vec![66, 6, 10, 34],
+            alloc::vec![12, 20, 36, 68],
+            alloc::vec![9, 24, 40, 72],
+            alloc::vec![48, 80, 18],
+            alloc::vec![96, 33],
+        ],
+        (2, 8) => alloc::vec![
+            alloc::vec![253, 223, 239, 191],
+            alloc::vec![247, 127, 251, 254],
+        ],
+        (3, 8) => alloc::vec![
+            alloc::vec![119, 159, 215, 175, 207, 95, 111, 249, 183, 231],
+            alloc::vec![235, 250, 190, 222, 238, 246, 243, 187, 219, 123],
+            alloc::vec![63, 245, 125, 221, 252, 237, 126, 189],
+        ],
+        (4, 8) => alloc::vec![
+            alloc::vec![151, 167, 91, 79, 199, 87, 103, 59, 241, 47, 55, 107, 155, 143],
+            alloc::vec![227, 182, 242, 158, 110, 174, 118, 203, 94, 179, 211, 62, 206, 115],
+            alloc::vec![229, 244, 157, 109, 230, 205, 181, 213, 117, 93, 188, 214, 124, 173],
+            alloc::vec![248, 236, 186, 234, 185, 218, 171, 121, 217, 122, 220, 61, 31, 233],
+        ],
         _ => return None,
     })
 }
@@ -244,6 +291,16 @@ mod tests {
             (4, 6),
             (5, 6),
             (6, 6),
+            (2, 7),
+            (3, 7),
+            (4, 7),
+            (5, 7),
+            (6, 7),
+            (7, 7),
+            (2, 8),
+            (3, 8),
+            (4, 8),
+            (8, 8),
         ];
         for &(t, n) in configs {
             // Use canonical active set {0, 1, ..., T-1}
@@ -279,10 +336,11 @@ mod coverage_tests {
     #[test]
     fn invalid_inputs_are_rejected() {
         assert!(rss_recover(&[0], 3, 2).is_err()); // wrong length
-        assert!(rss_recover(&[0, 1], 7, 2).is_err()); // N too large
+        assert!(rss_recover(&[0, 1], 9, 2).is_err()); // N too large
         assert!(rss_recover(&[0, 3], 3, 2).is_err()); // id ≥ N
         assert!(rss_recover(&[1, 0], 3, 2).is_err()); // unsorted
-        assert!(canonical_partition(2, 7).is_none());
+        assert!(canonical_partition(2, 9).is_none());
+        assert!(canonical_partition(5, 8).is_none()); // unsupported (impractical K)
         assert!(canonical_partition(3, 3).is_none()); // T = N handled by the caller
     }
 }
