@@ -142,7 +142,7 @@ pub const MAX_PARTIES: usize = 6;
 pub const FVEC_DIM: usize = (K + L) * N;
 
 /// Threshold-specific parameters for a given (T, N) pair.
-/// From ePrint 2026/013, Figure 8 (ML-DSA-44).
+/// From ePrint 2026/013 full version (ML-DSA-44; values as in the Go reference).
 ///
 /// - `r`: target hyperball radius for `χ_z`
 /// - `r1`: randomness hyperball radius for `χ_r`  
@@ -188,8 +188,8 @@ impl ThresholdParams {
 /// Returns `None` if (T, N) is not in the supported range
 /// (2 ≤ T ≤ N ≤ 6).
 ///
-/// Parameters from ePrint 2026/013, Figure 8 (ML-DSA-44). N = 7, 8 are not
-/// supported until parameters are derived with the paper's scripts.
+/// Parameters from the ePrint 2026/013 full version (ML-DSA-44; values as in
+/// the Go reference). N = 7, 8 are not supported until parameters are derived with the paper's scripts.
 /// All sets use the same multiplicative factor ν = 3.
 #[must_use] 
 pub fn get_threshold_params(t: u8, n: u8) -> Option<ThresholdParams> {
@@ -265,7 +265,7 @@ mod tests {
 
     #[test]
     fn test_all_param_sets_exist() {
-        // All 15 valid (T, N) pairs from Figure 8
+        // All 15 valid (T, N) pairs from the parameter table
         let valid = [
             (2, 2),
             (2, 3),

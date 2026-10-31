@@ -1,6 +1,6 @@
 //! Replicated Secret Sharing (RSS) key generation for threshold ML-DSA.
 //!
-//! Implements the paper's Figure 4 (Keygen): fresh independent secrets
+//! Implements the paper's keygen (Fig. 5, USENIX version): fresh independent secrets
 //! are sampled per (N-T+1)-subset, and the public key is derived from
 //! their sum. This matches the Go reference implementation exactly.
 //!
@@ -265,7 +265,7 @@ impl core::fmt::Debug for ThresholdPrivateKey {
     }
 }
 
-/// Threshold key generation following ePrint 2026/013, Figure 4.
+/// Threshold key generation following ePrint 2026/013 (Fig. 5 in the USENIX version).
 ///
 /// Generates a fresh threshold ML-DSA-44 keypair from a 32-byte seed.
 /// This is a deterministic function — the same seed always produces

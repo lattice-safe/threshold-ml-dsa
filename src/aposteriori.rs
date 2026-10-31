@@ -2,19 +2,29 @@
 //!
 //! Converts an existing, standard ML-DSA-44 secret key into threshold
 //! Replicated Secret Sharing (RSS) key material while preserving the original
-//! public key. This has not been checked against ePrint 2026/013 §4.2.
+//! public key.
 //!
-//! ## Why this is insecure
+//! ## This is not the paper's algorithm
 //!
-//! Signing needs short partial secrets, so the shares must be short
-//! integers. Then sharing a fixed, pre-existing short `s` cannot hide it:
-//! the T−1 parties outside a subset `J` see every share except `s_J` and so
-//! learn `d = s − s_J`; for a perfectly hiding scheme both `d` and `s_J`
-//! (seen by any single member of `J`) would have to be independent of `s`,
-//! which is impossible for bounded shares. With η = 2 a coalition learns
-//! about 0.7 bits per coefficient and the exact value of about 8% of
-//! coefficients. The remainder share is also not η-short, which breaks the
-//! norm assumption behind hyperball rejection. Use fresh keys
+//! The paper (USENIX Security '26 version of ePrint 2026/013, §3.4 and
+//! Theorem 3.3) shares an existing key by sampling *all* subset shares
+//! jointly from a discrete Gaussian conditioned on `Σ s_I = s` (GPV
+//! sampling in a coset of `{Σ x_I = 0}`). It accepts that a short sharing
+//! cannot be perfectly hiding and bounds the loss as a hint-MLWE problem:
+//! at most 7 bits of unforgeability under its formal parameters, and about
+//! 12 bits (heuristic) with share width √2. That algorithm is not
+//! implemented here.
+//!
+//! ## Why this implementation is insecure
+//!
+//! This module samples all shares but one uniformly from `[-η, η]` and
+//! gives the last subset the remainder `s − Σ others`. The T−1 parties
+//! outside a subset `J` see every share except `s_J` and so learn
+//! `d = s − s_J`; with uniform shares this reveals much more than the
+//! paper's Gaussian sharing (our own estimate for η = 2: about 0.7 bits per
+//! coefficient, and the exact value of about 8% of coefficients). The
+//! remainder share is also not η-short, which breaks the norm assumption
+//! behind hyperball rejection. No security bound is claimed. Use fresh keys
 //! ([`crate::rss::keygen_from_seed`] or [`crate::dkg`]) instead.
 //!
 //! ## Protocol Overview

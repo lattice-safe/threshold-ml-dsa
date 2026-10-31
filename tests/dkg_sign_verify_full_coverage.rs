@@ -31,7 +31,7 @@ fn dkg_until_round1(
     t: u8,
     n: u8,
     rng: &mut StdRng,
-) -> (Vec<dkg::DkgAwaitingCommits>, Vec<dkg::DkgCommitMsg>, Vec<DkgSeedMsg>) {
+) -> (Vec<dkg::DkgAwaitingCoins>, Vec<dkg::DkgCoinMsg>, Vec<DkgSeedMsg>) {
     let mut parties = Vec::new();
     let mut r0 = Vec::new();
     for me in 0..n {
@@ -40,15 +40,28 @@ fn dkg_until_round1(
         r0.push(m);
     }
     let mut st = Vec::new();
-    let mut commits = Vec::new();
+    let mut coins = Vec::new();
     let mut seeds = Vec::new();
     for p in parties {
-        let (s, c, sm) = p.round1(&r0, rng).unwrap();
+        let (s, c, sm) = p.round1(&r0).unwrap();
         st.push(s);
-        commits.push(c);
+        coins.push(c);
         seeds.extend(sm);
     }
-    (st, commits, seeds)
+    (st, coins, seeds)
+}
+
+/// Run DKG rounds 0-2 for all parties.
+fn dkg_until_round2(t: u8, n: u8, rng: &mut StdRng) -> (Vec<dkg::DkgAwaitingCommits>, Vec<dkg::DkgCommitMsg>) {
+    let (st, coins, seeds) = dkg_until_round1(t, n, rng);
+    let mut st2 = Vec::new();
+    let mut commits = Vec::new();
+    for (me, s) in st.into_iter().enumerate() {
+        let (s2, c) = s.round2(&coins, seeds_for(&seeds, me as u8), rng).unwrap();
+        st2.push(s2);
+        commits.push(c);
+    }
+    (st2, commits)
 }
 
 fn seeds_for(seeds: &[DkgSeedMsg], me: u8) -> Vec<DkgSeedMsg> {
@@ -231,25 +244,38 @@ fn test_dkg_coalition_never_receives_missing_subset() {
 #[test]
 fn test_dkg_tampered_reveal_is_detected() {
     let mut rng = StdRng::seed_from_u64(102);
-    let (st, commits, seeds) = dkg_until_round1(2, 3, &mut rng);
-    let mut st2 = Vec::new();
+    let (st2, commits) = dkg_until_round2(2, 3, &mut rng);
+    let mut st3 = Vec::new();
     let mut reveals = Vec::new();
-    for (me, s) in st.into_iter().enumerate() {
-        let (s2, r) = s.round2(&commits, seeds_for(&seeds, me as u8)).unwrap();
-        st2.push(s2);
+    for s in st2 {
+        let (s3, r) = s.round3(&commits).unwrap();
+        st3.push(s3);
         reveals.push(r);
     }
     reveals[1].t_parts[0].1[0] ^= 1;
-    for s in st2 {
-        assert_eq!(s.round3(&reveals).err(), Some(Error::DkgCommitmentMismatch { party: 1 }));
+    for s in st3 {
+        assert_eq!(s.round4(&reveals).err(), Some(Error::DkgCommitmentMismatch { party: 1 }));
+    }
+}
+
+#[test]
+fn test_dkg_tampered_coin_is_detected() {
+    let mut rng = StdRng::seed_from_u64(106);
+    let (st, mut coins, seeds) = dkg_until_round1(2, 3, &mut rng);
+    // A rushing party cannot change its coin share after seeing the others.
+    coins[2].coin[0] ^= 1;
+    for (me, s) in st.into_iter().enumerate() {
+        let r = s.round2(&coins, seeds_for(&seeds, me as u8), &mut rng);
+        let expected = if me == 2 { Error::DkgInconsistentTranscript } else { Error::DkgCommitmentMismatch { party: 2 } };
+        assert_eq!(r.err(), Some(expected));
     }
 }
 
 #[test]
 fn test_dkg_wrong_seed_is_detected_by_member() {
     let mut rng = StdRng::seed_from_u64(103);
-    let (st, commits, seeds) = dkg_until_round1(2, 3, &mut rng);
-    // Party 0 deals subset {0,1} (mask 0b011) to party 1; corrupt that seed.
+    let (st, coins, seeds) = dkg_until_round1(2, 3, &mut rng);
+    // Party 0 deals subset {0,1} (mask 0b011) to party 1; corrupt that key.
     let mut mine = seeds_for(&seeds, 1);
     let idx = mine.iter().position(|m| m.mask() == 0b011).unwrap();
     let mut bytes = mine[idx].to_bytes().to_vec();
@@ -258,31 +284,42 @@ fn test_dkg_wrong_seed_is_detected_by_member() {
     mine[idx] = DkgSeedMsg::from_bytes(&bytes).unwrap();
     let s1 = st.into_iter().nth(1).unwrap();
     assert_eq!(
-        s1.round2(&commits, mine).err(),
+        s1.round2(&coins, mine, &mut rng).err(),
         Some(Error::DkgSeedMismatch { dealer: 0, mask: 0b011 })
     );
 }
 
 #[test]
+fn test_dkg_dealer_commitment_checked_by_member() {
+    let mut rng = StdRng::seed_from_u64(107);
+    let (st2, mut commits) = dkg_until_round2(2, 3, &mut rng);
+    // Party 0 commits to a t_I that does not match the key it sent:
+    // party 1, a member of {0,1}, catches it before any reveal.
+    commits[0].commits[0].1[0] ^= 1;
+    let s1 = st2.into_iter().nth(1).unwrap();
+    assert_eq!(s1.round3(&commits).err(), Some(Error::DkgCommitmentMismatch { party: 0 }));
+}
+
+#[test]
 fn test_dkg_equivocation_is_detected_at_confirm() {
     let mut rng = StdRng::seed_from_u64(104);
-    let (st, commits, seeds) = dkg_until_round1(2, 3, &mut rng);
+    let (st2, commits) = dkg_until_round2(2, 3, &mut rng);
     // Party 0 equivocates: party 2 receives a different commitment for
     // subset {0,1} (mask 0b011), which party 2 is not a member of.
     let mut forked = commits.clone();
     forked[0].commits[0].1[0] ^= 1;
-    let mut st2 = Vec::new();
+    let mut st3 = Vec::new();
     let mut reveals = Vec::new();
-    for (me, s) in st.into_iter().enumerate() {
+    for (me, s) in st2.into_iter().enumerate() {
         let view = if me == 2 { &forked } else { &commits };
-        let (s2, r) = s.round2(view, seeds_for(&seeds, me as u8)).unwrap();
-        st2.push(s2);
+        let (s3, r) = s.round3(view).unwrap();
+        st3.push(s3);
         reveals.push(r);
     }
     // Party 2 detects the mismatch when the reveal arrives.
     let mut results = Vec::new();
-    for s in st2 {
-        results.push(s.round3(&reveals));
+    for s in st3 {
+        results.push(s.round4(&reveals));
     }
     assert_eq!(results[2].as_ref().err(), Some(&Error::DkgCommitmentMismatch { party: 0 }));
     // Parties 0 and 1 proceed, but cannot finish without 2's confirmation.
@@ -306,7 +343,7 @@ fn test_dkg_rejects_malformed_round_messages() {
         Some(Error::InvalidParameters)
     );
 
-    // Duplicate sender in round 0
+    // Duplicate sender / wrong key-commitment set / altered own message in round 0
     let mut parties = Vec::new();
     let mut r0 = Vec::new();
     for me in 0..3 {
@@ -316,23 +353,32 @@ fn test_dkg_rejects_malformed_round_messages() {
     }
     let mut dup = r0.clone();
     dup[1].from = 0;
-    let p0 = parties.remove(0);
-    assert_eq!(p0.round1(&dup, &mut rng).err(), Some(Error::DkgMalformedMessage));
+    let mut extra = r0.clone();
+    extra[2].key_commits.push((0b110, [0u8; 32]));
+    let mut altered = r0.clone();
+    altered[2].coin_commit[0] ^= 1;
+    let mut parties = parties.into_iter();
+    let p0 = parties.next().unwrap();
+    let p1 = parties.next().unwrap();
+    let p2 = parties.next().unwrap();
+    assert_eq!(p0.round1(&dup).err(), Some(Error::DkgMalformedMessage));
+    assert_eq!(p1.round1(&extra).err(), Some(Error::DkgMalformedMessage));
+    assert_eq!(p2.round1(&altered).err(), Some(Error::DkgInconsistentTranscript));
 
-    // Missing seed / extra seed / wrong session
-    let (st, commits, seeds) = dkg_until_round1(2, 3, &mut rng);
+    // Missing key / wrong session
+    let (st, coins, seeds) = dkg_until_round1(2, 3, &mut rng);
     let mut st = st.into_iter();
     let _s0 = st.next().unwrap();
     let s1 = st.next().unwrap();
     let s2 = st.next().unwrap();
-    // Party 2 deals nothing in (2, 3) and needs seeds for {0,2} and {1,2}.
+    // Party 2 deals nothing in (2, 3) and needs keys for {0,2} and {1,2}.
     let mut mine = seeds_for(&seeds, 2);
     assert_eq!(mine.len(), 2);
     mine.pop();
-    assert_eq!(s2.round2(&commits, mine).err(), Some(Error::DkgMalformedMessage));
-    let mut bad = commits.clone();
+    assert_eq!(s2.round2(&coins, mine, &mut rng).err(), Some(Error::DkgMalformedMessage));
+    let mut bad = coins.clone();
     bad[2].sid[0] ^= 1;
-    assert_eq!(s1.round2(&bad, seeds_for(&seeds, 1)).err(), Some(Error::DkgMalformedMessage));
+    assert_eq!(s1.round2(&bad, seeds_for(&seeds, 1), &mut rng).err(), Some(Error::DkgMalformedMessage));
     assert!(DkgSeedMsg::from_bytes(&[0u8; 10]).is_err());
 }
 

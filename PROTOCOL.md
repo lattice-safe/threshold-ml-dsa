@@ -6,8 +6,11 @@
 > `threshold-ml-dsa` v0.5.0, covering fresh key generation via Replicated
 > Secret Sharing (RSS), the 3-round threshold signing protocol with K-parallel
 > hyperball commitments for ML-DSA-44 with N ≤ 6, and FIPS 204-compatible
-> verification. The DKG and A Posteriori Key Sharing modules are behind the
-> non-default `insecure-keygen` feature and do not provide threshold security.
+> verification. The DKG (`dkg`) follows the outline in the Mithril slides;
+> the paper's own DKG is in the full version and has not been checked. The
+> a posteriori sharing module (`aposteriori`) is behind the non-default
+> `insecure-keygen` feature, is not the paper's §3.4 algorithm, and does not
+> provide threshold security.
 
 ---
 
@@ -65,7 +68,7 @@
 | Rounding bits | $d$ | $13$ | Power2Round parameter |
 | Hint budget | $\omega$ | $80$ | Max hint ones |
 
-### Threshold-Specific Parameters (Figure 8)
+### Threshold-Specific Parameters (full version; values as in the Go reference)
 
 | Parameter | Symbol | Description |
 |-----------|--------|-------------|
@@ -233,7 +236,7 @@ $$M=2,\ \mathcal{S}_2 = \left\{ \{0,1\},\ \{0,2\},\ \{1,2\} \right\} \qquad |\ma
 ### 5.2 Share Distribution (v0.3 — Paper-Faithful)
 
 In v0.3, secrets are generated **fresh and independently** per subset from a shared seed.
-This matches the paper's Figure 4 construction:
+This matches Fig. 5 of the paper (USENIX version) construction:
 
 $$\text{For each } S \in \mathcal{S}_M: \quad \mathbf{s}_1^{(S)} \xleftarrow{\text{SHAKE-256}} [-\eta, \eta]^{n \cdot \ell}$$
 
@@ -285,7 +288,7 @@ graph LR
 
 ---
 
-## 6. Threshold Key Generation (v0.3 — Figure 4)
+## 6. Threshold Key Generation (v0.3 — Fig. 5, USENIX version)
 
 ```mermaid
 flowchart TD
@@ -459,7 +462,7 @@ independent hyperball samples. The coordinator tries each of the K slots,
 accepting the first one that produces a valid FIPS 204 signature. This
 dramatically improves per-round success probability.
 
-### Numerical Values (ML-DSA-44, exact implementation values from Figure 8)
+### Numerical Values (ML-DSA-44, exact implementation values from the full version, as in the Go reference)
 
 | (T, N) | K | Radius r | Radius r1 |
 |--------|---|----------|-----------|
@@ -578,7 +581,7 @@ All constant-time comparisons use `subtle::ConstantTimeEq`. All norm checks (`ch
 
 ## 12. Sequence Diagrams
 
-### 12.1 Key Generation and Share Distribution (Figure 4)
+### 12.1 Key Generation and Share Distribution (Fig. 5, USENIX version)
 
 ```mermaid
 sequenceDiagram
@@ -796,7 +799,7 @@ The crate exposes a high-level SDK module: `threshold_ml_dsa::sdk`.
 ### Mapping to Core Protocol
 
 - `ThresholdMlDsa44Sdk::from_seed(...)`
-  - Calls `rss::keygen_from_seed()` (Figure 4 fresh keygen)
+  - Calls `rss::keygen_from_seed()` (Fig. 5 fresh keygen)
   - Produces `ThresholdPrivateKey` for each party
 - `ThresholdMlDsa44Sdk::threshold_sign(active, msg, rng)`
   - Round 1: `sign::round1()` — K hyperball commitments per party
@@ -818,6 +821,6 @@ be transported with authenticated encryption and replay protection.
 > **References:**
 >
 > - NIST FIPS 204 — _Module-Lattice-Based Digital Signature Standard_ (2024)
-> - ePrint 2026/013 — _Efficient Threshold ML-DSA via Replicated Secret Sharing_
+> - ePrint 2026/013 — _Efficient Threshold ML-DSA_ (Celi, del Pino, Espitau, Niot, Prest; USENIX Security 2026)
 > - [Threshold-ML-DSA (Go)](https://github.com/Threshold-ML-DSA/Threshold-ML-DSA) — Reference Go implementation
 > - [`dilithium-rs`](https://crates.io/crates/dilithium-rs) — Pure-Rust FIPS 204 implementation

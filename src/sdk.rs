@@ -72,7 +72,7 @@ impl ThresholdMlDsa44Sdk {
 
     /// Create a threshold SDK from a 32-byte seed.
     ///
-    /// Generates fresh threshold keys using the paper's keygen (Figure 4).
+    /// Generates fresh threshold keys using the paper's keygen (Fig. 5, USENIX version).
     /// Returns the SDK instance ready for signing.
     pub fn from_seed(seed: &[u8; 32], t: u8, n: u8, max_retries: usize) -> Result<Self, Error> {
         let params = get_threshold_params(t, n).ok_or(Error::InvalidParameters)?;
@@ -95,7 +95,8 @@ impl ThresholdMlDsa44Sdk {
     /// Create a threshold SDK by splitting an existing standard ML-DSA-44 secret key.
     ///
     /// **Insecure** (requires the `insecure-keygen` feature): the shares
-    /// leak the original secret to coalitions smaller than T.
+    /// leak the original secret to coalitions smaller than T. This is not
+    /// the paper's a posteriori sharing; see [`crate::aposteriori`].
     #[cfg(feature = "insecure-keygen")]
     pub fn insecure_from_existing_key(
         sk_bytes: &[u8],

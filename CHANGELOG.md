@@ -8,16 +8,23 @@ Security fixes from an internal review. This release has breaking API changes.
 
 - **New DKG.** The old DKG derived the master seed from contributions that
   every party reveals, so every participant (and any observer of the
-  broadcast) could derive the full secret key. `dkg` now deals each subset
-  secret from one of its own members, privately to the other members, with
-  commit/reveal of `t_I` and a confirmation round against equivocation. No
-  party receives a subset secret it is not a member of. `dkg_round1/2`,
+  broadcast) could derive the full secret key. `dkg` now follows the outline
+  in the Mithril slides (NIST MPTS 2026, slides 18–19): each subset key `K_I`
+  is chosen by one of its members and sent privately to the other members,
+  all `K_I` and coin shares are committed before a joint coin is revealed,
+  `s_I = H(sid, coin, I, K_I)`, `t_I` is committed and revealed, and a
+  confirmation round catches equivocation. No party receives a subset secret
+  it is not a member of, a dealer cannot grind `s_I`, and no party can bias
+  `ρ` except by aborting. The paper's own DKG is in the full version, which
+  has not been checked. `dkg_round1/2`,
   `dkg_finalize`, `DkgContribution` and `from_dkg` are removed. **Keys created
   with the old `from_dkg` must be treated as compromised.**
 - **A posteriori sharing is behind the non-default `insecure-keygen` feature**
   and renamed `insecure_share_existing_key` / `insecure_from_existing_key`.
-  Short shares cannot hide a pre-existing short secret: coalitions smaller
-  than T learn part of it. **Keys shared with `from_existing_key` must be
+  It samples uniform shares plus a non-short remainder, which is not the
+  paper's algorithm (§3.4 of the USENIX version: Gaussian shares conditioned
+  on their sum, 7–12 bits of security loss), and coalitions smaller than T
+  learn part of the original secret. **Keys shared with `from_existing_key` must be
   treated as compromised.** It now also rejects malformed secret keys
   (coefficients outside `[-η, η]`, mismatched `tr`).
 - **Nonce-reuse protection.** `round1` takes a `NonceGuard` that refuses a
@@ -72,7 +79,10 @@ Security fixes from an internal review. This release has breaking API changes.
   `ExpandA` (previously uniform but not FIPS-identical). `Poly::pack_z` centers
   coefficients first. These are not used by the signing protocol.
 - Documentation no longer claims the DKG and a posteriori sharing implement
-  ePrint 2026/013 §4.3/§4.2 (not verified), or "production-grade" status.
+  ePrint 2026/013 §4.3/§4.2, or "production-grade" status. Paper references
+  were checked against the USENIX Security '26 version: keygen is Fig. 5, a
+  posteriori sharing is §3.4, and the DKG and per-(T, N) parameters are in the
+  full version.
 
 ### Changed (breaking)
 

@@ -11,7 +11,7 @@ A `#![no_std]`-compatible Rust implementation of threshold ML-DSA based on the M
 > **Security notice (v0.5.0).** Versions 0.3.1–0.4.0 had a hyperball sampler
 > bug that disabled rejection sampling; upgrade and consider rotating keys used
 > with them. 0.5.0 replaces the old DKG (which gave every party the full key)
-> with a real one, moves a posteriori sharing behind the non-default
+> with a real one, moves the (non-paper, insecure) a posteriori sharing behind the non-default
 > `insecure-keygen` feature, and supports only N ≤ 6. See
 > [CHANGELOG.md](CHANGELOG.md).
 
@@ -26,7 +26,7 @@ Standard threshold signature schemes based on Shamir secret sharing introduce la
 | Feature | Description | Reference |
 |---|---|---|
 | **FIPS 204 Verifier Compatible** | Output signatures pass any standard, unmodified ML-DSA verifier | FIPS 204 |
-| **Fresh Threshold Keygen** | Independent secrets per subset — dealer-based key generation | Figure 4 |
+| **Fresh Threshold Keygen** | Independent secrets per subset — dealer-based key generation | Fig. 5 (USENIX version) |
 | **K-Parallel Repetitions** | Amortized rejection sampling via K parallel commitment slots per round | §3.2 |
 | **Hyperball Rejection** | Rényi-divergence-safe L₂ norm rejection via FVec + Box-Muller | §2.7 |
 | **Balanced RSS Partition** | Algorithm 6 (`RSSRecover`) for $N \le 6$ | Algorithm 6 |
@@ -50,8 +50,8 @@ Standard threshold signature schemes based on Shamir secret sharing introduce la
          │                      │                      │
          │             ┌────────▼────────┐    ┌────────▼────────┐
          │             │  aposteriori.rs │    │    dkg.rs       │
-         │             │ (insecure)      │    │ 4-round DKG     │
-         │             │ sharing (§4.2)  │    │ protocol (§4.3) │
+         │             │ (insecure, not  │    │ 5-round DKG     │
+         │             │ paper's §3.4)   │    │ (slides 18–19)  │
          │             └────────┬────────┘    └────────┬────────┘
          │                      │                      │
          │             ┌────────▼────────┐    ┌────────▼────────┐
@@ -102,6 +102,12 @@ channel; `DkgSeedMsg` is secret and must go over an authenticated, encrypted
 point-to-point channel to its recipient. No party ever holds a subset secret
 it is not a member of.
 
+The design follows the outline in the Mithril NIST MPTS slides (18–19):
+per-subset keys `K_I`, a jointly sampled coin, `s_I = H(coin, K_I)`,
+commit-and-reveal of `t_I`, `t = Σ t_I`. The paper defers its DKG to the full
+version of ePrint 2026/013, which we have not been able to check; the exact
+messages and checks here are this crate's own.
+
 ```rust
 use threshold_ml_dsa::dkg::{DkgConfig, DkgParty};
 use threshold_ml_dsa::nonce::InMemoryNonceGuard;
@@ -109,12 +115,14 @@ use threshold_ml_dsa::nonce::InMemoryNonceGuard;
 // On party `me`, with `transport` your networking layer:
 let (party, r0) = DkgParty::start(DkgConfig { t, n, me, context }, &mut rng)?;
 let all_r0 = transport.broadcast(r0);
-let (party, commit, seed_msgs) = party.round1(&all_r0, &mut rng)?;
-let all_commits = transport.broadcast(commit);
+let (party, coin, seed_msgs) = party.round1(&all_r0)?;
+let all_coins = transport.broadcast(coin);
 let my_seeds = transport.send_private(seed_msgs); // encrypted, per recipient
-let (party, reveal) = party.round2(&all_commits, my_seeds)?;
+let (party, commit) = party.round2(&all_coins, my_seeds, &mut rng)?;
+let all_commits = transport.broadcast(commit);
+let (party, reveal) = party.round3(&all_commits)?;
 let all_reveals = transport.broadcast(reveal);
-let (party, confirm) = party.round3(&all_reveals)?;
+let (party, confirm) = party.round4(&all_reveals)?;
 let all_confirms = transport.broadcast(confirm);
 let (pk, my_key) = party.finalize(&all_confirms)?;
 let stored = my_key.to_bytes()?; // protect at rest
@@ -125,9 +133,12 @@ let stored = my_key.to_bytes()?; // protect at rest
 ### Insecure: sharing an existing key (`insecure-keygen` feature)
 
 `aposteriori::insecure_share_existing_key` / `insecure_from_existing_key`
-split an existing ML-DSA-44 key. Because shares must be short, this cannot
-hide the original secret: coalitions smaller than T learn part of it. It is
-kept for testing and interoperability experiments only.
+split an existing ML-DSA-44 key with uniform shares plus a remainder share.
+Coalitions smaller than T learn part of the original secret, and the remainder
+share is not short. This is **not** the paper's a posteriori sharing (§3.4 of
+the USENIX version), which samples Gaussian shares conditioned on their sum and
+bounds the loss at 7–12 bits of security; that algorithm is not implemented.
+It is kept for testing and interoperability experiments only.
 
 ### Nonce safety
 
@@ -142,7 +153,7 @@ together (e.g. a VM snapshot) is not protected against.
 
 ## Supported Threshold Configurations
 
-The implementation includes paper-exact parameters for all 15 $(T, N)$ sets from ePrint 2026/013 Figure 8. $N > 6$ is not supported:
+The implementation includes paper-exact parameters for all 15 $(T, N)$ sets from ePrint 2026/013 (full version; the USENIX version defers per-(T, N) parameters to it). $N > 6$ is not supported:
 
 | $(T, N)$ | Parallel Reps $K$ | Target Radius $r$ | Randomness Radius $r_1$ | Expansion $\nu$ |
 |---|---|---|---|---|
@@ -216,9 +227,9 @@ cargo bench --bench benchmarks -- --nocapture
 | `poly` | Polynomial ring arithmetic: NTT, INTT, Montgomery reduction, norms, SHAKE-256 sampling |
 | `fvec` | Floating-point vector (`FVec`) + Box-Muller `SampleHyperball` + $L_2$ norm rejection |
 | `partition` | Algorithm 6 (`RSSRecover`) for $N \le 6$ |
-| `rss` | `keygen_from_seed()`: fresh independent secrets per subset (Figure 4) |
+| `rss` | `keygen_from_seed()`: fresh independent secrets per subset (Fig. 5, USENIX version) |
 | `aposteriori` | **Insecure**, `insecure-keygen` only: split an existing ML-DSA-44 secret key |
-| `dkg` | Distributed key generation: per-subset dealing, commit/reveal, confirm round |
+| `dkg` | Distributed key generation: per-subset keys, joint coin, commit/reveal of `t_I`, confirm round |
 | `nonce` | `NonceGuard` / `InMemoryNonceGuard`: Round 1 nonce-reuse protection |
 | `sign` | 3-round party protocol: K-parallel commit, reveal, respond |
 | `coordinator` | K-parallel `Combine`: $\delta$-norm check, hint generation, FIPS 204 packing |

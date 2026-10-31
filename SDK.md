@@ -41,7 +41,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 ### `ThresholdMlDsa44Sdk::from_seed(seed, t, n, max_retries)`
 
 Generate fresh threshold keys from a 32-byte seed. This follows the paper's
-Figure 4 keygen: each RSS subset gets an independently sampled secret.
+Fig. 5 (USENIX version) keygen: each RSS subset gets an independently sampled secret.
 
 **Parameters:**
 - `seed: &[u8; 32]` — deterministic seed (use `OsRng` in production)
@@ -138,7 +138,7 @@ threshold_sign(active, msg, rng)
 ## Supported Configurations
 
 All (T, N) pairs with 2 ≤ T ≤ N ≤ 6 are supported, using exact parameters
-from ePrint 2026/013, Figure 8.
+from the ePrint 2026/013 full version (values as in the Go reference).
 
 ## Security Model
 

@@ -43,8 +43,9 @@
 #[cfg(not(feature = "std"))]
 extern crate alloc;
 
-/// **Insecure**: splitting an existing key leaks it to sub-threshold
-/// coalitions. Only available with the `insecure-keygen` feature.
+/// **Insecure**: this way of splitting an existing key (not the paper's
+/// Gaussian sharing) leaks it to sub-threshold coalitions. Only available
+/// with the `insecure-keygen` feature.
 #[cfg(feature = "insecure-keygen")]
 pub mod aposteriori;
 pub mod coordinator;
