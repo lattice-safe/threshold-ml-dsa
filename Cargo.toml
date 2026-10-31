@@ -1,6 +1,6 @@
 [package]
 name = "threshold-ml-dsa"
-version = "0.5.0"
+version = "0.5.1"
 edition = "2021"
 rust-version = "1.79"
 description = "Threshold ML-DSA (FIPS 204) via the Mithril scheme (ePrint 2026/013)"

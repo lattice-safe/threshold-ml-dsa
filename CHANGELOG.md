@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.5.1] - 2026-10-31
+
+### Changed
+
+- CHANGELOG: the 0.4.1 entry credits the reporter through the GitHub Security
+  Advisory. No code changes.
+
 ## [0.5.0] - 2026-10-31
 
 Security fixes from an internal review. This release has breaking API changes.
