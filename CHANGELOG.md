@@ -1,6 +1,6 @@
 # Changelog
 
-## [0.5.0] - Unreleased
+## [0.5.0] - 2026-10-31
 
 Security fixes from an internal review. This release has breaking API changes.
 
