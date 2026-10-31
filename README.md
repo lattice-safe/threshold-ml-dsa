@@ -8,12 +8,13 @@ A `#![no_std]`-compatible Rust implementation of threshold ML-DSA based on the M
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Rust](https://img.shields.io/badge/rust-1.79%2B-orange.svg)](https://www.rust-lang.org)
 
-> **Security notice (v0.5.0).** Versions 0.3.1–0.4.0 had a hyperball sampler
-> bug that disabled rejection sampling; upgrade and consider rotating keys used
-> with them. 0.5.0 replaces the old DKG (which gave every party the full key)
-> with a real one, replaces the insecure a posteriori sharing with the paper's
-> Gaussian sharing, and supports N ≤ 8 (except (5,8), (6,8), (7,8)). See
-> [CHANGELOG.md](CHANGELOG.md).
+> **Security notice.** Versions before 0.5.0 are affected by
+> [GHSA-hqr3-xgxm-59jr](https://github.com/lattice-safe/threshold-ml-dsa/security/advisories/GHSA-hqr3-xgxm-59jr)
+> (critical: the old DKG gave every party the full key) and 0.3.1–0.4.0 also by
+> [GHSA-22vh-j6fg-hm7g](https://github.com/lattice-safe/threshold-ml-dsa/security/advisories/GHSA-22vh-j6fg-hm7g)
+> (rejection sampling disabled). Upgrade to 0.5.1 or later and replace affected
+> keys; see [SECURITY.md](SECURITY.md) for which keys and how to report issues,
+> and [CHANGELOG.md](CHANGELOG.md) for details. 0.3.1–0.4.1 are yanked.
 
 ---
 
@@ -69,6 +70,11 @@ Standard threshold signature schemes based on Shamir secret sharing introduce la
 ---
 
 ## Quick Start
+
+```toml
+[dependencies]
+threshold-ml-dsa = "0.5"
+```
 
 ### 1. Fresh Key Generation (Trusted Dealer)
 
@@ -256,7 +262,7 @@ cargo bench --bench benchmarks -- --nocapture
 | `params` | FIPS 204 constants for ML-DSA-44, 65, 87 + `ThresholdParams` lookup table |
 | `poly` | Polynomial ring arithmetic: NTT, INTT, Montgomery reduction, norms, SHAKE-256 sampling |
 | `fvec` | Floating-point vector (`FVec`) + Box-Muller `SampleHyperball` + $L_2$ norm rejection |
-| `partition` | Algorithm 6 (`RSSRecover`) for $N \le 6$ |
+| `partition` | Algorithm 6 (`RSSRecover`): paper tables for $N \le 6$, max-flow balanced partitions for $N = 7, 8$ |
 | `rss` | `keygen_from_seed()`: fresh independent secrets per subset (Fig. 5, USENIX version) |
 | `aposteriori` | Split an existing ML-DSA-44 secret key with Gaussian shares conditioned on their sum (§3.4) |
 | `dkg` | Distributed key generation: per-subset keys, joint coin, commit/reveal of `t_I`, confirm round |
@@ -280,6 +286,12 @@ cargo test --release --test security_regressions
 
 # Run end-to-end threshold signing tests
 cargo test --test v03_tests
+
+# N = 7, 8 (large-K configurations are slow; run them in release)
+cargo test --release --test n78_tests -- --include-ignored
+
+# Line coverage of the unit tests alone (100%)
+cargo llvm-cov --lib --show-missing-lines
 ```
 
 ---
@@ -295,6 +307,8 @@ cargo test --test v03_tests
 - **Zeroize-on-Drop (best effort)**: `FVec`, `StRound1`, `StRound2`, `ThresholdPrivateKey`, and `Share` implement `Zeroize` and `Drop`; nonce and secret intermediates are wiped explicitly. `sha3` states are wiped on drop; copies left by moves of other stack values are not.
 - **100% Safe Rust**: `#![forbid(unsafe_code)]`.
 - **Side channels**: the nonce sampler uses branch-free sine/cosine and rounding instead of `libm`'s branching versions; hardware `f64` arithmetic and `sqrt` remain (see `fvec.rs`).
+
+Report vulnerabilities privately; see [SECURITY.md](SECURITY.md).
 
 ---
 
