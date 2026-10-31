@@ -159,7 +159,8 @@ Security fixes from an internal review. This release has breaking API changes.
   (introduced in d429a0b); 0.3.0 is unaffected. All threshold-signing users
   should upgrade, and keys used for threshold signing with affected versions
   should be considered for rotation.
-  Thanks to Md Alquamah for responsible disclosure.
+  Reported through responsible disclosure (credited in the GitHub Security
+  Advisory).
 
 ### Changed
 
