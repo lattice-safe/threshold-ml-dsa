@@ -14,7 +14,7 @@ exclude = ["scratch_test.rs", "fuzz/", "target/"]
 [dependencies]
 rand_core = { version = "0.6", default-features = false }
 zeroize = { version = "1", default-features = false, features = ["derive", "alloc"] }
-sha3 = { version = "0.10", default-features = false }
+sha3 = { version = "0.10.9", default-features = false, features = ["zeroize"] }
 subtle = { version = "2", default-features = false }
 libm = "0.2"
 

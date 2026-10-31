@@ -16,7 +16,9 @@
 //! `|x_i| ≤ 10` (tail mass below 2⁻⁴⁴ per coordinate).
 //!
 //! The paper samples this coset Gaussian with a GPV sampler analysed under
-//! Rényi divergence. This module samples it **exactly** by rejection:
+//! Rényi divergence. This module samples it by rejection, exactly up to
+//! the 64-bit rounding of its probability tables (statistical distance
+//! about 2⁻⁶³ per coefficient):
 //! propose `x_1..x_{S−1}` i.i.d. from the truncated `D_{Z,σ}`, set
 //! `x_S = s − Σ x_i`, and accept with probability `exp(−x_S²/4)·[|x_S| ≤ 10]`.
 //! The accepted vector has density ∝ `Π exp(−x_i²/4)` on the coset, which is
@@ -389,33 +391,100 @@ mod tests {
     }
 
     #[test]
-    fn sharing_preserves_pk_and_sums_to_secret() {
+    fn sharing_sums_to_secret_and_shares_give_pk() {
         let (pk_bytes, sk_bytes) = verify::keygen(&[42u8; 32]);
-        let params = get_threshold_params(3, 5).unwrap();
+        let params = get_threshold_params(4, 6).unwrap();
         let mut rng = StdRng::seed_from_u64(1);
         let (pk, sks) = share_existing_key(&sk_bytes, &params, &mut rng).unwrap();
         assert_eq!(pk[..], pk_bytes[..PK_BYTES]);
-        assert_eq!(sks.len(), 5);
+        assert_eq!(sks.len(), 6);
 
-        // Σ_I s_I equals the original s₁ (take each subset once).
-        let mut total = PolyVecL::zero();
-        let mut seen = 0u32;
+        // Σ_I s_I equals the original (s₁, s₂); take each subset once and
+        // check that every party's copy of a subset share is identical.
+        let mut total1 = PolyVecL::zero();
+        let mut total2 = PolyVecK::zero();
+        let mut first: BTreeMap<u8, u8> = BTreeMap::new();
         for sk in &sks {
             for (&mask, share) in &sk.shares {
-                if seen & (1 << mask) == 0 {
-                    seen |= 1 << mask;
-                    total.add_assign(&share.s1);
-                    assert!(share.s1.polys.iter().all(|p| p.coeffs.iter().all(|c| c.abs() <= SHARE_BOUND)));
+                assert!(mask & (1 << sk.id) != 0);
+                assert!(share
+                    .s1
+                    .polys
+                    .iter()
+                    .chain(share.s2.polys.iter())
+                    .all(|p| p.coeffs.iter().all(|c| c.abs() <= SHARE_BOUND)));
+                if let Some(&owner) = first.get(&mask) {
+                    let other = &sks[owner as usize].shares[&mask];
+                    assert!(other.s1.polys.iter().zip(&share.s1.polys).all(|(a, b)| a.coeffs == b.coeffs));
+                    assert!(other.s2.polys.iter().zip(&share.s2.polys).all(|(a, b)| a.coeffs == b.coeffs));
+                } else {
+                    first.insert(mask, sk.id);
+                    total1.add_assign(&share.s1);
+                    total2.add_assign(&share.s2);
                 }
             }
         }
+        assert_eq!(first.len(), subset_masks(6, 4).len());
         use dilithium::{packing::unpack_sk, polyvec::{PolyVecK as DK, PolyVecL as DL}, ML_DSA_44};
         let (mut rho, mut tr, mut key) = ([0u8; 32], [0u8; TRBYTES], [0u8; 32]);
         let (mut t0, mut s1, mut s2) = (DK::default(), DL::default(), DK::default());
         unpack_sk(ML_DSA_44, &mut rho, &mut tr, &mut key, &mut t0, &mut s1, &mut s2, &sk_bytes);
         for i in 0..L {
-            assert_eq!(total.polys[i].coeffs[..], s1.vec[i].coeffs[..N]);
+            assert_eq!(total1.polys[i].coeffs[..], s1.vec[i].coeffs[..N]);
         }
+        for i in 0..K {
+            assert_eq!(total2.polys[i].coeffs[..], s2.vec[i].coeffs[..N]);
+        }
+
+        // The public key computed from the shares' sum is the original one.
+        let mut h1 = total1.clone();
+        h1.reduce();
+        h1.ntt();
+        assert_eq!(compute_public_key(&rho, &h1, &total2)[..], pk_bytes[..PK_BYTES]);
+    }
+
+    #[test]
+    fn rejects_secret_outside_eta_even_with_matching_tr() {
+        // A key whose s₁ has a coefficient of 3 but whose tr is consistent,
+        // so only the η range check can reject it.
+        let (_, sk_bytes) = verify::keygen(&[43u8; 32]);
+        use dilithium::{packing::unpack_sk, polyvec::{PolyVecK as DK, PolyVecL as DL}, ML_DSA_44};
+        let (mut rho, mut tr, mut key) = ([0u8; 32], [0u8; TRBYTES], [0u8; 32]);
+        let (mut t0, mut s1, mut s2) = (DK::default(), DL::default(), DK::default());
+        unpack_sk(ML_DSA_44, &mut rho, &mut tr, &mut key, &mut t0, &mut s1, &mut s2, &sk_bytes);
+        let mut v1 = PolyVecL::zero();
+        for i in 0..L {
+            v1.polys[i].coeffs.copy_from_slice(&s1.vec[i].coeffs[..N]);
+        }
+        let mut v2 = PolyVecK::zero();
+        for i in 0..K {
+            v2.polys[i].coeffs.copy_from_slice(&s2.vec[i].coeffs[..N]);
+        }
+        v1.polys[0].coeffs[0] = 3;
+        let mut h1 = v1.clone();
+        h1.reduce();
+        h1.ntt();
+        let pk = compute_public_key(&rho, &h1, &v2);
+        let mut tr2 = [0u8; TRBYTES];
+        let mut h = Shake256::default();
+        h.update(&pk);
+        h.finalize_xof().read(&mut tr2);
+
+        let params = get_threshold_params(2, 3).unwrap();
+        let mut rng = StdRng::seed_from_u64(3);
+        assert_eq!(
+            share_vectors(&v1, &v2, &rho, &tr2, &sk_bytes, &params, &mut rng).err(),
+            Some(Error::InvalidParameters)
+        );
+        v1.polys[0].coeffs[0] = 2;
+        let mut h1 = v1.clone();
+        h1.reduce();
+        h1.ntt();
+        let pk = compute_public_key(&rho, &h1, &v2);
+        let mut h = Shake256::default();
+        h.update(&pk);
+        h.finalize_xof().read(&mut tr2);
+        assert!(share_vectors(&v1, &v2, &rho, &tr2, &sk_bytes, &params, &mut rng).is_ok());
     }
 
     #[test]

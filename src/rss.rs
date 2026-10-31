@@ -39,7 +39,9 @@ use zeroize::Zeroize;
 use crate::aposteriori::SHARE_BOUND;
 
 /// A single subset's secret key: `(s₁_I, s₂_I)` where I ⊂ [N], |I| = N-T+1.
-/// Both vectors have coefficients drawn from `χ_s = U([-η, η])`.
+/// Fresh and DKG keys draw coefficients from `χ_s = U([-η, η])`; a
+/// posteriori sharing ([`crate::aposteriori`]) gives Gaussian coefficients
+/// in `[-10, 10]`.
 ///
 /// Fields are `pub(crate)` to prevent accidental exfiltration.
 #[derive(Clone)]
@@ -145,7 +147,7 @@ impl ThresholdPrivateKey {
 
     /// Serialize this party's key for storage or transfer to the party.
     ///
-    /// Format (version 1): `1 ‖ t ‖ n ‖ id ‖ ρ ‖ key ‖ tr ‖ count ‖
+    /// Format (version 2): `2 ‖ t ‖ n ‖ id ‖ ρ ‖ key ‖ tr ‖ count ‖
     /// (mask ‖ s₁ ‖ s₂)*`, each share coefficient as one byte `c + 10`
     /// (fresh keys have `|c| ≤ η`, a posteriori shares `|c| ≤ 10`).
     /// The output contains secret material and is wiped on drop; protect it
@@ -237,7 +239,7 @@ impl ThresholdPrivateKey {
     }
 }
 
-const KEY_FORMAT_VERSION: u8 = 1;
+const KEY_FORMAT_VERSION: u8 = 2;
 const KEY_HEADER_BYTES: usize = 4 + 32 + 32 + TRBYTES + 1;
 const KEY_SHARE_BYTES: usize = 1 + (L + K) * N;
 

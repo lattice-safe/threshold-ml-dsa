@@ -66,6 +66,8 @@ Security fixes from an internal review. This release has breaking API changes.
   partial secret in Round 3, keygen totals and a posteriori intermediates.
   `ThresholdPrivateKey` is no longer `Clone`; `keygen*` return the secret key
   in `Zeroizing`. `Poly`'s `Debug` no longer prints a coefficient.
+  SHAKE states are wiped on drop (`sha3` 0.10.9 with the `zeroize`
+  feature), since a leftover XOF state can regenerate every key share.
 
 ### Added
 
@@ -77,6 +79,7 @@ Security fixes from an internal review. This release has breaking API changes.
 - `aposteriori::share_existing_key` and `ThresholdMlDsa44Sdk::from_existing_key`
   (Gaussian a posteriori sharing, see above). Private key serialization
   accepts share coefficients in `[-10, 10]` to hold Gaussian shares.
+  The key format is now version 2.
 - `ThresholdParams::validate`, `ThresholdPrivateKey::threshold`.
 
 ### Fixed

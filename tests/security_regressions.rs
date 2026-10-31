@@ -271,7 +271,7 @@ fn private_key_serialization_roundtrip_and_validation() {
 
     let good = sdk.party_key(1).unwrap().to_bytes().unwrap();
     let mut bad = good.to_vec();
-    bad[0] = 2; // version
+    bad[0] = 1; // old version
     assert!(ThresholdPrivateKey::from_bytes(&bad).is_err());
     let mut bad = good.to_vec();
     bad[2] = 7; // N = 7 unsupported
@@ -387,7 +387,8 @@ fn aposteriori_rejects_malformed_secret_keys() {
     bad[64] ^= 1;
     assert!(share(&bad).is_err());
 
-    // s₁ coefficient outside [-η, η]: 3-bit value 7 decodes to η − 7 = −5.
+    // s₁ coefficient outside [-η, η] (also breaks tr; the η check alone is
+    // tested in aposteriori::tests).
     let mut bad = sk.to_vec();
     bad[128] = 0xFF; // first s₁ byte (sk = ρ ‖ K ‖ tr ‖ s₁ ‖ s₂ ‖ t₀)
     assert!(share(&bad).is_err());
